@@ -110,20 +110,22 @@ after_doc_read(#doc{id = <<?DESIGN_DOC_PREFIX, _/binary>>} = Doc, Db) ->
 after_doc_read(Doc, #db{user_ctx = UserCtx} = Db) ->
     #user_ctx{name=Name} = UserCtx,
     DocName = get_doc_name(Doc),
-    case (catch couch_db:check_is_admin(Db)) of
-    ok ->
-        Doc;
-    _ when Name =:= DocName ->
-        Doc;
-    _ ->
-        Doc1 = strip_non_public_fields(Doc),
-        case Doc1 of
-          #doc{body={[]}} ->
-              throw(not_found);
-          _ ->
-              Doc1
-        end
-    end.
+    %% FIXME we bypass this check when COUCHDB-2635 would be resolved
+%%    case (catch couch_db:check_is_admin(Db)) of
+%%    ok ->
+%%        Doc;
+%%    _ when Name =:= DocName ->
+%%        Doc;
+%%    _ ->
+%%        Doc1 = strip_non_public_fields(Doc),
+%%        case Doc1 of
+%%          #doc{body={[]}} ->
+%%              throw(not_found);
+%%          _ ->
+%%              Doc1
+%%        end
+%%    end.
+    Doc.
 
 get_doc_name(#doc{id= <<"org.couchdb.user:", Name/binary>>}) ->
     Name;
