@@ -26,26 +26,26 @@
 -define(replace(L, K, V), lists:keystore(K, 1, L, {K, V})).
 
 % If the request's userCtx identifies an admin
-%   -> save_doc (see below)
+%   -> transform_doc (see below)
 %
 % If the request's userCtx.name is null:
-%   -> save_doc
+%   -> transform_doc
 %   // this is an anonymous user registering a new document
 %   // in case a user doc with the same id already exists, the anonymous
 %   // user will get a regular doc update conflict.
 % If the request's userCtx.name doesn't match the doc's name
 %   -> 404 // Not Found
 % Else
-%   -> save_doc
+%   -> transform_doc
 before_doc_update(Doc, #db{user_ctx = UserCtx} = Db) ->
     #user_ctx{name=Name} = UserCtx,
     DocName = get_doc_name(Doc),
     case (catch couch_db:check_is_admin(Db)) of
     ok ->
-        save_doc(Doc);
+        transform_doc(Doc);
     _ when Name =:= DocName orelse Name =:= null ->
-        save_doc(Doc);
-    _ ->
+        transform_doc(Doc);
+    _Else ->
         throw(not_found)
     end.
 
@@ -56,7 +56,7 @@ before_doc_update(Doc, #db{user_ctx = UserCtx} = Db) ->
 %    newDoc.password_sha = hash_pw(newDoc.password + salt)
 %    newDoc.salt = salt
 %    newDoc.password = null
-save_doc(#doc{body={Body}} = Doc) ->
+transform_doc(#doc{body={Body}} = Doc) ->
     case couch_util:get_value(?PASSWORD, Body) of
     null -> % server admins don't have a user-db password entry
         Doc;
