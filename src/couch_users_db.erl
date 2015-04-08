@@ -13,6 +13,7 @@
 -module(couch_users_db).
 
 -export([before_doc_update/2, after_doc_read/2, strip_non_public_fields/1]).
+-export([transform_doc/1]).
 
 -include_lib("couch/include/couch_db.hrl").
 
