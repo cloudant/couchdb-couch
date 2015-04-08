@@ -168,9 +168,13 @@ validate_docid(Id) when is_binary(Id) ->
     case Id of
     <<"_design/", _/binary>> -> ok;
     <<"_local/", _/binary>> -> ok;
-    <<"_", _/binary>> ->
-        throw({bad_request, <<"Only reserved document ids may start with underscore.">>});
-    _Else -> ok
+    _Else ->
+        case cloudant_util:validate_docid(Id, []) of
+        ok ->
+            ok;
+        {error, _} ->
+            throw({bad_request, <<"Only reserved document ids may start with underscore.">>})
+        end
     end;
 validate_docid(Id) ->
     couch_log:debug("Document id is not a string: ~p", [Id]),
