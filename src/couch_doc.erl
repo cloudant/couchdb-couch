@@ -169,7 +169,7 @@ validate_docid(Id) when is_binary(Id) ->
     <<"_design/", _/binary>> -> ok;
     <<"_local/", _/binary>> -> ok;
     _Else ->
-        case cloudant_util:validate_docid(Id, []) of
+        case cloudant_couch:validate_docid(Id, []) of
         ok ->
             ok;
         {error, _} ->
