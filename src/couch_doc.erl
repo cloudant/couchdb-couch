@@ -168,9 +168,13 @@ validate_docid(Id) when is_binary(Id) ->
     case Id of
     <<"_design/", _/binary>> -> ok;
     <<"_local/", _/binary>> -> ok;
-    <<"_", _/binary>> ->
-        throw({bad_request, <<"Only reserved document ids may start with underscore.">>});
-    _Else -> ok
+    _Else ->
+        case cloudant_util:validate_docid(Id, []) of
+        ok ->
+            ok;
+        {error, _} ->
+            throw({bad_request, <<"Only reserved document ids may start with underscore.">>})
+        end
     end;
 validate_docid(Id) ->
     couch_log:debug("Document id is not a string: ~p", [Id]),
@@ -273,12 +277,7 @@ max_seq(Tree, UpdateSeq) ->
 
 to_doc_info_path(#full_doc_info{id=Id,rev_tree=Tree,update_seq=FDISeq}) ->
     RevInfosAndPath = [
-        {#rev_info{
-            deleted = Leaf#leaf.deleted,
-            body_sp = Leaf#leaf.ptr,
-            seq = Leaf#leaf.seq,
-            rev = {Pos, RevId}
-        }, Path} || {Leaf, {Pos, [RevId | _]} = Path} <-
+        {rev_info(Node), Path} || {_Leaf, Path} = Node <-
             couch_key_tree:get_all_leafs(Tree)
     ],
     SortedRevInfosAndPath = lists:sort(
@@ -291,6 +290,20 @@ to_doc_info_path(#full_doc_info{id=Id,rev_tree=Tree,update_seq=FDISeq}) ->
     RevInfos = [RevInfo || {RevInfo, _Path} <- SortedRevInfosAndPath],
     {#doc_info{id=Id, high_seq=max_seq(Tree, FDISeq), revs=RevInfos}, WinPath}.
 
+rev_info({#leaf{} = Leaf, {Pos, [RevId | _]}}) ->
+    #rev_info{
+        deleted = Leaf#leaf.deleted,
+        body_sp = Leaf#leaf.ptr,
+        seq = Leaf#leaf.seq,
+        rev = {Pos, RevId}
+    };
+rev_info({#doc{} = Doc, {Pos, [RevId | _]}}) ->
+    #rev_info{
+        deleted = Doc#doc.deleted,
+        body_sp = undefined,
+        seq = undefined,
+        rev = {Pos, RevId}
+    }.
 
 is_deleted(#full_doc_info{rev_tree=Tree}) ->
     is_deleted(Tree);

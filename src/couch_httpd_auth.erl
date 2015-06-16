@@ -28,7 +28,7 @@
 
 -import(couch_httpd, [header_value/2, send_json/2,send_json/4, send_method_not_allowed/2]).
 
--compile({no_auto_import,[integer_to_binary/1]}).
+-compile({no_auto_import,[integer_to_binary/1, integer_to_binary/2]}).
 
 special_test_authentication_handler(Req) ->
     case header_value(Req, "WWW-Authenticate") of
@@ -158,8 +158,8 @@ proxy_auth_user(Req) ->
             end,
             case config:get("couch_httpd_auth", "proxy_use_secret", "false") of
                 "true" ->
-                    case config:get("couch_httpd_auth", "secret", nil) of
-                        nil ->
+                    case config:get("couch_httpd_auth", "secret", undefined) of
+                        undefined ->
                             Req#httpd{user_ctx=#user_ctx{name=?l2b(UserName), roles=Roles}};
                         Secret ->
                             ExpectedToken = couch_util:to_hex(crypto:sha_mac(Secret, UserName)),
@@ -195,8 +195,8 @@ cookie_authentication_handler(#httpd{mochi_req=MochiReq}=Req, AuthModule) ->
         end,
         % Verify expiry and hash
         CurrentTime = make_cookie_time(),
-        case config:get("couch_httpd_auth", "secret", nil) of
-        nil ->
+        case config:get("couch_httpd_auth", "secret", undefined) of
+        undefined ->
             couch_log:debug("cookie auth secret is not set",[]),
             Req;
         SecretStr ->
@@ -260,8 +260,8 @@ cookie_auth_cookie(Req, User, Secret, TimeStamp) ->
         [{path, "/"}] ++ cookie_scheme(Req) ++ max_age()).
 
 ensure_cookie_auth_secret() ->
-    case config:get("couch_httpd_auth", "secret", nil) of
-        nil ->
+    case config:get("couch_httpd_auth", "secret", undefined) of
+        undefined ->
             NewSecret = ?b2l(couch_uuids:random()),
             config:set("couch_httpd_auth", "secret", NewSecret),
             NewSecret;
@@ -372,9 +372,11 @@ maybe_value(Key, Else, Fun) ->
 
 maybe_upgrade_password_hash(Req, UserName, Password, UserProps,
         AuthModule, AuthCtx) ->
+    Upgrade = config:get("couch_httpd_auth", "upgrade_password_on_auth", "true"),
     IsAdmin = lists:member(<<"_admin">>, couch_util:get_value(<<"roles">>, UserProps, [])),
-    case {IsAdmin, couch_util:get_value(<<"password_scheme">>, UserProps, <<"simple">>)} of
-    {false, <<"simple">>} ->
+    case {IsAdmin, Upgrade,
+         couch_util:get_value(<<"password_scheme">>, UserProps, <<"simple">>)} of
+    {false, "true", <<"simple">>} ->
         UserProps2 = proplists:delete(<<"password_sha">>, UserProps),
         UserProps3 = [{<<"password">>, Password} | UserProps2],
         NewUserDoc = couch_doc:from_json_obj({UserProps3}),

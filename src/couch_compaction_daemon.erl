@@ -15,14 +15,14 @@
 -behaviour(config_listener).
 
 % public API
--export([start_link/0]).
+-export([start_link/0, in_progress/0]).
 
 % gen_server callbacks
 -export([init/1, handle_call/3, handle_info/2, handle_cast/2]).
 -export([code_change/3, terminate/2]).
 
 % config_listener api
--export([handle_config_change/5]).
+-export([handle_config_change/5, handle_config_terminate/3]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include_lib("kernel/include/file.hrl").
@@ -30,7 +30,8 @@
 -define(CONFIG_ETS, couch_compaction_daemon_config).
 
 -record(state, {
-    loop_pid
+    loop_pid,
+    in_progress = []
 }).
 
 -record(config, {
@@ -50,6 +51,8 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
+in_progress() ->
+    gen_server:call(?MODULE, in_progress).
 
 init(_) ->
     process_flag(trap_exit, true),
@@ -82,16 +85,18 @@ handle_cast({config_update, DbName, Config}, #state{loop_pid = Loop} = State) ->
     {noreply, State}.
 
 
+handle_call({start, DbName}, {Pid, _},
+        #state{loop_pid = Pid, in_progress = InProgress} = State) ->
+    {reply, ok, State#state{in_progress = [DbName|InProgress]}};
+handle_call({stop, DbName}, {Pid, _},
+        #state{loop_pid = Pid, in_progress = InProgress} = State) ->
+    {reply, ok, State#state{in_progress = InProgress -- [DbName]}};
+handle_call(in_progress, _From, #state{in_progress = InProgress} = State) ->
+    {reply, InProgress, State};
 handle_call(Msg, _From, State) ->
     {stop, {unexpected_call, Msg}, State}.
 
 
-handle_info({gen_event_EXIT, {config_listener, ?MODULE}, _Reason}, State) ->
-    erlang:send_after(5000, self(), restart_config_listener),
-    {noreply, State};
-handle_info(restart_config_listener, State) ->
-    ok = config:listen_for_changes(?MODULE, nil),
-    {noreply, State};
 handle_info({'EXIT', Pid, Reason}, #state{loop_pid = Pid} = State) ->
     {stop, {compaction_loop_died, Reason}, State}.
 
@@ -109,6 +114,12 @@ handle_config_change("compactions", DbName, Value, _, _) ->
 handle_config_change(_, _, _, _, _) ->
     {ok, nil}.
 
+handle_config_terminate(_, stop, _) -> ok;
+handle_config_terminate(_, _, _) ->
+    spawn(fun() ->
+        timer:sleep(5000),
+        config:listen_for_changes(?MODULE, nil)
+    end).
 
 compact_loop(Parent) ->
     {ok, _} = couch_server:all_databases(
@@ -123,7 +134,7 @@ compact_loop(Parent) ->
                 {ok, Config} ->
                     case check_period(Config) of
                     true ->
-                        maybe_compact_db(DbName, Config);
+                        maybe_compact_db(Parent, DbName, Config);
                     false ->
                         ok
                     end
@@ -142,12 +153,13 @@ compact_loop(Parent) ->
     compact_loop(Parent).
 
 
-maybe_compact_db(DbName, Config) ->
+maybe_compact_db(Parent, DbName, Config) ->
     case (catch couch_db:open_int(DbName, [?ADMIN_CTX])) of
     {ok, Db} ->
         DDocNames = db_ddoc_names(Db),
         case can_db_compact(Config, Db) of
         true ->
+            gen_server:call(Parent, {start, DbName}),
             {ok, _} = couch_db:start_compact(Db),
             TimeLeft = compact_time_left(Config),
             case Config#config.parallel_view_compact of
@@ -192,7 +204,8 @@ maybe_compact_db(DbName, Config) ->
                     unlink(ViewsCompactPid),
                     exit(ViewsCompactPid, kill)
                 end
-            end;
+            end,
+            gen_server:call(Parent, {stop, DbName});
         false ->
             couch_db:close(Db),
             maybe_compact_views(DbName, DDocNames, Config)

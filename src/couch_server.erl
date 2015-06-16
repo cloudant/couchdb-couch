@@ -13,7 +13,7 @@
 -module(couch_server).
 -behaviour(gen_server).
 -behaviour(config_listener).
--vsn(1).
+-vsn(2).
 
 -export([open/2,create/2,delete/2,get_version/0,get_version/1,get_uuid/0]).
 -export([all_databases/0, all_databases/2]).
@@ -23,7 +23,7 @@
 -export([close_lru/0]).
 
 % config_listener api
--export([handle_config_change/5]).
+-export([handle_config_change/5, handle_config_terminate/3]).
 
 -include_lib("couch/include/couch_db.hrl").
 
@@ -59,8 +59,8 @@ get_version(short) ->
 
 
 get_uuid() ->
-    case config:get("couchdb", "uuid", nil) of
-        nil ->
+    case config:get("couchdb", "uuid", undefined) of
+        undefined ->
             UUID = couch_uuids:random(),
             config:set("couchdb", "uuid", ?b2l(UUID)),
             UUID;
@@ -119,8 +119,8 @@ delete(DbName, Options) ->
 maybe_add_sys_db_callbacks(DbName, Options) when is_binary(DbName) ->
     maybe_add_sys_db_callbacks(?b2l(DbName), Options);
 maybe_add_sys_db_callbacks(DbName, Options) ->
-    DbsDbName = config:get("mem3", "shard_db", "dbs"),
-    NodesDbName = config:get("mem3", "shard_db", "nodes"),
+    DbsDbName = config:get("mem3", "shards_db", "_dbs"),
+    NodesDbName = config:get("mem3", "nodes_db", "_nodes"),
     IsReplicatorDb = DbName == config:get("replicator", "db", "_replicator") orelse
 	path_ends_with(DbName, <<"_replicator">>),
     IsUsersDb = DbName ==config:get("couch_httpd_auth", "authentication_db", "_users") orelse
@@ -246,6 +246,14 @@ handle_config_change("httpd_db_handlers", _, _, _, _) ->
     {ok, couch_httpd:stop()};
 handle_config_change(_, _, _, _, _) ->
     {ok, nil}.
+
+handle_config_terminate(_, stop, _) -> ok;
+handle_config_terminate(_, _, _) ->
+    spawn(fun() ->
+        timer:sleep(5000),
+        config:listen_for_changes(?MODULE, nil)
+    end).
+
 
 
 all_databases() ->

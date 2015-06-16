@@ -23,13 +23,13 @@ setup() ->
     %% On other hand, we cannot unload driver here due to
     %% {error, not_loaded_by_this_process} while it is. Any ideas is welcome.
     %%
-    ok = test_util:start_couch(),
+    Ctx = test_util:start_couch(),
     %% config:start_link(?CONFIG_CHAIN),
     %% {ok, _} = couch_drv:start_link(),
-    ok.
+    Ctx.
 
-teardown(_) ->
-    ok = test_util:stop_couch(),
+teardown(Ctx) ->
+    ok = test_util:stop_couch(Ctx),
     %% config:stop(),
     %% erl_ddll:unload_driver(couch_icu_driver),
     ok.
@@ -47,6 +47,15 @@ collation_test_() ->
                     should_collate_non_ascii()
                 ]
             }
+        ]
+    }.
+
+validate_callback_exists_test_() ->
+    {
+        "validate_callback_exists tests",
+        [
+            fun should_succeed_for_existent_cb/0,
+            should_fail_for_missing_cb()
         ]
     }.
 
@@ -133,4 +142,21 @@ find_in_binary_test_() ->
                                               [Needle, Haystack])),
             {Msg, ?_assertMatch(Result,
                                 couch_util:find_in_binary(Needle, Haystack))}
+        end, Cases).
+
+should_succeed_for_existent_cb() ->
+    ?_assert(couch_util:validate_callback_exists(lists, any, 2)).
+
+should_fail_for_missing_cb() ->
+    Cases = [
+        {unknown_module, any, 1},
+        {erlang, unknown_function, 1},
+        {erlang, whereis, 100}
+    ],
+    lists:map(
+        fun({M, F, A} = MFA) ->
+            Name = lists:flatten(io_lib:format("~w:~w/~w", [M, F, A])),
+            {Name, ?_assertThrow(
+                {error, {undefined_callback, Name, MFA}},
+                couch_util:validate_callback_exists(M, F, A))}
         end, Cases).

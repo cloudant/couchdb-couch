@@ -12,7 +12,7 @@
 
 -module(couch_auth_cache).
 -behaviour(gen_server).
--vsn(1).
+-vsn(2).
 -behaviour(config_listener).
 
 % public API
@@ -23,7 +23,7 @@
 -export([start_link/0, init/1, handle_call/3, handle_info/2, handle_cast/2]).
 -export([code_change/3, terminate/2]).
 
--export([handle_config_change/5]).
+-export([handle_config_change/5, handle_config_terminate/3]).
 -export([handle_db_event/3]).
 
 -include_lib("couch/include/couch_db.hrl").
@@ -38,6 +38,7 @@
     cache_size = 0,
     db_notifier = nil,
     db_mon_ref = nil,
+    closed = [],
     event_listener = nil
 }).
 
@@ -231,14 +232,17 @@ handle_info(restart_event_listener, State) ->
             ?MODULE, handle_db_event, nil, [{dbname, AuthDbName}]
         ),
     {noreply, State#state{event_listener=NewListener}};
-handle_info({gen_event_EXIT, {config_listener, ?MODULE}, _Reason}, State) ->
-    erlang:send_after(5000, self(), restart_config_listener),
-    {noreply, State};
-handle_info(restart_config_listener, State) ->
-    ok = config:listen_for_changes(?MODULE, nil),
-    {noreply, State};
+handle_info({'DOWN', _Ref, _, _, shutdown}, State) ->
+    {stop, shutdown, State};
 handle_info({'DOWN', Ref, _, _, _Reason}, #state{db_mon_ref = Ref} = State) ->
-    {noreply, reinit_cache(State)}.
+    {noreply, reinit_cache(State)};
+handle_info({'DOWN', Ref, _, _, Reason}, #state{closed = Closed} = State) ->
+    case lists:delete(Ref, Closed) of
+        Closed ->
+            {stop, Reason, State};
+        NewClosed ->
+            {noreply, reinit_cache(State#state{closed = NewClosed})}
+    end.
 
 
 terminate(_Reason, #state{event_listener = Listener}) ->
@@ -261,6 +265,12 @@ handle_config_change("couch_httpd_auth", "authentication_db", _DbName, _, _) ->
 handle_config_change(_, _, _, _, _) ->
     {ok, nil}.
 
+handle_config_terminate(_, stop, _) -> ok;
+handle_config_terminate(_, _, _) ->
+    spawn(fun() ->
+        timer:sleep(5000),
+        config:listen_for_changes(?MODULE, nil)
+    end).
 
 clear_cache(State) ->
     exec_if_auth_db(fun(AuthDb) -> catch couch_db:close(AuthDb) end),
@@ -269,13 +279,14 @@ clear_cache(State) ->
     State#state{cache_size = 0}.
 
 
-reinit_cache(State) ->
+reinit_cache(#state{db_mon_ref = Ref, closed = Closed} = State) ->
     NewState = clear_cache(State),
     AuthDbName = ?l2b(config:get("couch_httpd_auth", "authentication_db")),
     true = ets:insert(?STATE, {auth_db_name, AuthDbName}),
     AuthDb = open_auth_db(),
     true = ets:insert(?STATE, {auth_db, AuthDb}),
-    NewState#state{db_mon_ref = erlang:monitor(process, AuthDb#db.main_pid)}.
+    NewState#state{closed = [Ref|Closed],
+                   db_mon_ref = erlang:monitor(process, AuthDb#db.main_pid)}.
 
 
 add_cache_entry(_, _, _, #state{max_cache_size = 0} = State) ->

@@ -32,6 +32,12 @@
 -define(TEMPDIR,
     filename:join([?BUILDDIR(), "tmp", "tmp_data"])).
 
+-define(APPDIR, filename:dirname(element(2, file:get_cwd()))).
+%% Account for the fact that source files are in src/<app>/.eunit/<module>.erl
+%% when run from eunit
+-define(ABS_PATH(File), %% src/<app>/.eunit/<module>.erl
+    filename:join([?APPDIR, File])).
+
 -define(tempfile,
     fun() ->
         {A, B, C} = erlang:now(),
@@ -70,4 +76,21 @@
             end
         end)())
     end).
+-endif.
+-ifndef(assertNotEqual).
+-define(assertNotEqual(Unexpected, Expr),
+    begin
+    ((fun (__X) ->
+        case (Expr) of
+        __X -> erlang:error({assertNotEqual_failed,
+                     [{module, ?MODULE},
+                      {line, ?LINE},
+                      {expression, (??Expr)},
+                      {value, __X}]});
+        _ -> ok
+        end
+      end)(Unexpected))
+    end).
+-define(_assertNotEqual(Unexpected, Expr),
+    ?_test(?assertNotEqual(Unexpected, Expr))).
 -endif.
