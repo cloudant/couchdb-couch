@@ -60,8 +60,10 @@ before_doc_update(Doc, #db{user_ctx = UserCtx} = Db) ->
 %    newDoc.salt = salt
 %    newDoc.password = null
 transform_doc(#doc{body={Body}} = Doc) ->
-    case couch_util:get_value(?PASSWORD, Body) of
-    null -> % server admins don't have a user-db password entry
+    %% Support both schemes to smooth migration from legacy scheme
+    Scheme = config:get("couch_httpd_auth", "password_scheme", "pbkdf2"),
+    case {couch_util:get_value(?PASSWORD, Body), Scheme} of
+    {null, _} -> % server admins don't have a user-db password entry
         Doc;
     {undefined, _} ->
         Doc;
