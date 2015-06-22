@@ -83,7 +83,10 @@ transform_doc(#doc{body={Body}} = Doc) ->
         Body2 = ?replace(Body1, ?DERIVED_KEY, DerivedKey),
         Body3 = ?replace(Body2, ?SALT, Salt),
         Body4 = proplists:delete(?PASSWORD, Body3),
-        Doc#doc{body={Body4}}
+        Doc#doc{body={Body4}};
+    {_ClearPassword, Scheme} ->
+        couch_log:warn("Configured password scheme '~p' not recognised.", [Scheme]),
+        Doc
     end.
 
 % If the doc is a design doc
