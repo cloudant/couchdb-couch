@@ -584,7 +584,9 @@ validate_doc_update(Db, Doc, GetDiskDocFun) ->
 
 validate_ddoc(DbName, DDoc) ->
     try
-        couch_index_server:validate(DbName, couch_doc:with_ejson_body(DDoc))
+        DDocWithBody = couch_doc:with_ejson_body(DDoc),
+        couch_index_server:validate(DbName, DDocWithBody),
+        cloudant_couch:validate_ddoc(DbName, DDocWithBody)
     catch
         throw:{invalid_design_doc, Reason} ->
             {bad_request, invalid_design_doc, Reason};

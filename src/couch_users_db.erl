@@ -13,7 +13,6 @@
 -module(couch_users_db).
 
 -export([before_doc_update/2, after_doc_read/2, strip_non_public_fields/1]).
--export([transform_doc/1]).
 
 -include_lib("couch/include/couch_db.hrl").
 
@@ -45,9 +44,9 @@ before_doc_update(Doc, #db{user_ctx = UserCtx} = Db) ->
     DocName = get_doc_name(Doc),
     case (catch couch_db:check_is_admin(Db)) of
     ok ->
-        transform_doc(Doc);
+        save_doc(Doc);
     _ when Name =:= DocName orelse Name =:= null ->
-        transform_doc(Doc);
+        save_doc(Doc);
     _Else ->
         throw(not_found)
     end.
@@ -59,7 +58,7 @@ before_doc_update(Doc, #db{user_ctx = UserCtx} = Db) ->
 %    newDoc.password_sha = hash_pw(newDoc.password + salt)
 %    newDoc.salt = salt
 %    newDoc.password = null
-transform_doc(#doc{body={Body}} = Doc) ->
+save_doc(#doc{body={Body}} = Doc) ->
     %% Support both schemes to smooth migration from legacy scheme
     Scheme = config:get("couch_httpd_auth", "password_scheme", "pbkdf2"),
     case {couch_util:get_value(?PASSWORD, Body), Scheme} of
