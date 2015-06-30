@@ -28,17 +28,17 @@
 -define(replace(L, K, V), lists:keystore(K, 1, L, {K, V})).
 
 % If the request's userCtx identifies an admin
-%   -> transform_doc (see below)
+%   -> save_doc (see below)
 %
 % If the request's userCtx.name is null:
-%   -> transform_doc
+%   -> save_doc
 %   // this is an anonymous user registering a new document
 %   // in case a user doc with the same id already exists, the anonymous
 %   // user will get a regular doc update conflict.
 % If the request's userCtx.name doesn't match the doc's name
 %   -> 404 // Not Found
 % Else
-%   -> transform_doc
+%   -> save_doc
 before_doc_update(Doc, #db{user_ctx = UserCtx} = Db) ->
     #user_ctx{name=Name} = UserCtx,
     DocName = get_doc_name(Doc),
