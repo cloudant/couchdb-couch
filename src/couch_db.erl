@@ -37,6 +37,7 @@
 -export([validate_dbname/1]).
 
 -include_lib("couch/include/couch_db.hrl").
+-include("couch_db_int.hrl").
 
 -define(DBNAME_REGEX,
     "^[a-z][a-z0-9\\_\\$()\\+\\-\\/]*" % use the stock CouchDB regex
