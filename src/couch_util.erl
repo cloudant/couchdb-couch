@@ -198,10 +198,14 @@ json_apply_field({Key, NewValue}, [{OtherKey, OtherVal} | Headers], Acc) ->
 json_apply_field({Key, NewValue}, [], Acc) ->
     {[{Key, NewValue}|Acc]}.
 
-json_user_ctx(#db{name=ShardName, user_ctx=Ctx}) ->
-    {[{<<"db">>, mem3:dbname(ShardName)},
-            {<<"name">>,Ctx#user_ctx.name},
-            {<<"roles">>,Ctx#user_ctx.roles}]}.
+json_user_ctx(Db) ->
+    DbName = mem3:dbname(couch_db:name(Db)),
+    Ctx = couch_db:info(Db, user_ctx),
+    {[
+            {<<"db">>, DbName},
+            {<<"name">>, Ctx#user_ctx.name},
+            {<<"roles">>, Ctx#user_ctx.roles}
+    ]}.
 
 
 % returns a random integer
@@ -441,18 +445,21 @@ encode_doc_id(Id) ->
     url_encode(Id).
 
 
-with_db(Db, Fun) when is_record(Db, db) ->
-    Fun(Db);
-with_db(DbName, Fun) ->
-    case couch_db:open_int(DbName, [?ADMIN_CTX]) of
-        {ok, Db} ->
-            try
-                Fun(Db)
-            after
-                catch couch_db:close(Db)
-            end;
-        Else ->
-            throw(Else)
+with_db(DbOrName, Fun) ->
+    case couch_db:is_db(DbOrName) of
+        true ->
+            Fun(DbOrName);
+        false ->
+            case couch_db:open_int(DbOrName, [?ADMIN_CTX]) of
+                {ok, Db} ->
+                    try
+                        Fun(Db)
+                    after
+                        catch couch_db:close(Db)
+                    end;
+                Else ->
+                    throw(Else)
+            end
     end.
 
 rfc1123_date() ->

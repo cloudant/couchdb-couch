@@ -80,7 +80,7 @@ handle_changes(Args1, Req, Db0, Type) ->
     end,
     {StartListenerFun, View} = if UseViewChanges ->
         {ok, {_, View0, _}, _, _} = couch_mrview_util:get_view(
-                Db0#db.name, DDocName, ViewName, #mrargs{}),
+                couch_db:name(Db0), DDocName, ViewName, #mrargs{}),
         case View0#mrview.seq_btree of
             #btree{} ->
                 ok;
@@ -89,14 +89,14 @@ handle_changes(Args1, Req, Db0, Type) ->
         end,
         SNFun = fun() ->
             couch_event:link_listener(
-                 ?MODULE, handle_view_event, {self(), DDocName}, [{dbname, Db0#db.name}]
+                 ?MODULE, handle_view_event, {self(), DDocName}, [{dbname, couch_db:name(Db0)}]
             )
         end,
         {SNFun, View0};
     true ->
         SNFun = fun() ->
             couch_event:link_listener(
-                 ?MODULE, handle_db_event, self(), [{dbname, Db0#db.name}]
+                 ?MODULE, handle_db_event, self(), [{dbname, couch_db:name(Db0)}]
             )
         end,
         {SNFun, undefined}
@@ -111,7 +111,7 @@ handle_changes(Args1, Req, Db0, Type) ->
         end,
         View2 = if UseViewChanges ->
             {ok, {_, View1, _}, _, _} = couch_mrview_util:get_view(
-                    Db0#db.name, DDocName, ViewName, #mrargs{}),
+                    couch_db:name(Db0), DDocName, ViewName, #mrargs{}),
             View1;
         true ->
             undefined
@@ -333,16 +333,6 @@ check_docids(_) ->
     throw({bad_request, Msg}).
 
 
-open_ddoc(#db{name=DbName, id_tree=undefined}, DDocId) ->
-    {_, Ref} = spawn_monitor(fun() ->
-        exit(fabric:open_doc(mem3:dbname(DbName), DDocId, [ejson_body]))
-    end),
-    receive
-        {'DOWN', Ref, _, _, {ok, _}=Response} ->
-            Response;
-        {'DOWN', Ref, _, _, Response} ->
-            throw(Response)
-    end;
 open_ddoc(Db, DDocId) ->
     case couch_db:open_doc(Db, DDocId, [ejson_body]) of
         {ok, _} = Resp -> Resp;
@@ -509,11 +499,11 @@ can_optimize(_, _) ->
 
 
 send_changes_doc_ids(Db, StartSeq, Dir, Fun, Acc0, {doc_ids, _Style, DocIds}) ->
-    Lookups = couch_btree:lookup(Db#db.id_tree, DocIds),
+    {ok, Results} = couch_db:open_docs(Db, DocIds, [full_doc_info]),
     FullInfos = lists:foldl(fun
-        ({ok, FDI}, Acc) -> [FDI | Acc];
+        (#full_doc_info{}=FDI, Acc) -> [FDI | Acc];
         (not_found, Acc) -> Acc
-    end, [], Lookups),
+    end, [], Results),
     send_lookup_changes(FullInfos, StartSeq, Dir, Db, Fun, Acc0).
 
 
@@ -522,7 +512,7 @@ send_changes_design_docs(Db, StartSeq, Dir, Fun, Acc0, {design_docs, _Style}) ->
         {ok, [FullDocInfo | Acc]}
     end,
     KeyOpts = [{start_key, <<"_design/">>}, {end_key_gt, <<"_design0">>}],
-    {ok, _, FullInfos} = couch_btree:fold(Db#db.id_tree, FoldFun, [], KeyOpts),
+    {ok, FullInfos} = couch_db:fold_docs(Db, FoldFun, [], KeyOpts),
     send_lookup_changes(FullInfos, StartSeq, Dir, Db, Fun, Acc0).
 
 
@@ -583,8 +573,8 @@ keep_sending_changes(Args, Acc0, FirstRound) ->
     true ->
         case wait_updated(Timeout, TimeoutFun, UserAcc2) of
         {updated, UserAcc4} ->
-            DbOptions1 = [{user_ctx, Db#db.user_ctx} | DbOptions],
-            case couch_db:open(Db#db.name, DbOptions1) of
+            DbOptions1 = [{user_ctx, couch_db:info(Db, user_ctx)} | DbOptions],
+            case couch_db:open(couch_db:name(Db), DbOptions1) of
             {ok, Db2} ->
                 keep_sending_changes(
                   Args#changes_args{limit=NewLimit},
@@ -608,7 +598,8 @@ keep_sending_changes(Args, Acc0, FirstRound) ->
 maybe_refresh_view(_, undefined, undefined) ->
     undefined;
 maybe_refresh_view(Db, DDocName, ViewName) ->
-    {ok, {_, View, _}, _, _} = couch_mrview_util:get_view(Db#db.name, DDocName, ViewName, #mrargs{}),
+    DbName = couch_db:name(Db),
+    {ok, {_, View, _}, _, _} = couch_mrview_util:get_view(DbName, DDocName, ViewName, #mrargs{}),
     View.
 
 end_sending_changes(Callback, UserAcc, EndSeq, ResponseType) ->

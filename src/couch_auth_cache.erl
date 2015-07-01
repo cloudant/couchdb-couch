@@ -285,8 +285,10 @@ reinit_cache(#state{db_mon_ref = Ref, closed = Closed} = State) ->
     true = ets:insert(?STATE, {auth_db_name, AuthDbName}),
     AuthDb = open_auth_db(),
     true = ets:insert(?STATE, {auth_db, AuthDb}),
-    NewState#state{closed = [Ref|Closed],
-                   db_mon_ref = erlang:monitor(process, AuthDb#db.main_pid)}.
+    NewState#state{
+        closed = [Ref|Closed],
+        db_mon_ref = couch_db:monitor(AuthDb)
+    }.
 
 
 add_cache_entry(_, _, _, #state{max_cache_size = 0} = State) ->
@@ -327,15 +329,11 @@ refresh_entries(AuthDb) ->
     nil ->
         ok;
     AuthDb2 ->
-        case AuthDb2#db.update_seq > AuthDb#db.update_seq of
+        case couch_db:update_seq(AuthDb2) > couch_db:update_seq(AuthDb) of
         true ->
-            {ok, _, _} = couch_db:enum_docs_since(
-                AuthDb2,
-                AuthDb#db.update_seq,
-                fun(DocInfo, _, _) -> refresh_entry(AuthDb2, DocInfo) end,
-                AuthDb#db.update_seq,
-                []
-            ),
+            Options = [{start_key, couch_db:update_seq(AuthDb)}],
+            Fun = fun(DocInfo, _, _) -> refresh_entry(AuthDb2, DocInfo) end,
+            {ok, _} = couch_db:fold_changes(AuthDb2, Options, Fun, nil),
             true = ets:insert(?STATE, {auth_db, AuthDb2});
         false ->
             ok
@@ -391,7 +389,7 @@ cache_needs_refresh() ->
             nil ->
                 false;
             AuthDb2 ->
-                AuthDb2#db.update_seq > AuthDb#db.update_seq
+                couch_db:update_seq(AuthDb2) > couch_db:update_seq(AuthDb)
             end
         end,
         false
@@ -412,7 +410,8 @@ exec_if_auth_db(Fun) ->
 
 exec_if_auth_db(Fun, DefRes) ->
     case ets:lookup(?STATE, auth_db) of
-    [{auth_db, #db{} = AuthDb}] ->
+    [{auth_db, AuthDb}] ->
+        true = couch_db:is_db(AuthDb),
         Fun(AuthDb);
     _ ->
         DefRes
