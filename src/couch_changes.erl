@@ -192,6 +192,8 @@ get_callback_acc(Callback) when is_function(Callback, 2) ->
     {fun(Ev, Data, _) -> Callback(Ev, Data) end, ok}.
 
 
+configure_filter("_doc_ids", _Style, #httpd{req_body=undefined}, _Db) ->
+    throw({bad_request, "`_doc_ids` filter requires JSON body containing doc ids."});
 configure_filter("_doc_ids", Style, Req, _Db) ->
     {doc_ids, Style, get_doc_ids(Req)};
 configure_filter("_design", Style, _Req, _Db) ->
