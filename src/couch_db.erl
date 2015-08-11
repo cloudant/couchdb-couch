@@ -45,35 +45,12 @@
 ).
 
 start_link(Engine, DbName, Filepath, Options) ->
-    case open_db_file(Filepath, Options) of
-    {ok, Fd} ->
-        {ok, UpdaterPid} = gen_server:start_link(couch_db_updater, {DbName,
-            Filepath, Fd, Options}, []),
-        unlink(Fd),
-        gen_server:call(UpdaterPid, get_db);
-    Else ->
-        Else
-    end.
-
-open_db_file(Filepath, Options) ->
-    case couch_file:open(Filepath, Options) of
-    {ok, Fd} ->
-        {ok, Fd};
-    {error, enoent} ->
-        % couldn't find file. is there a compact version? This can happen if
-        % crashed during the file switch.
-        case couch_file:open(Filepath ++ ".compact", [nologifmissing]) of
-        {ok, Fd} ->
-            couch_log:info("Found ~s~s compaction file, using as primary"
-                           " storage.", [Filepath, ".compact"]),
-            ok = file:rename(Filepath ++ ".compact", Filepath),
-            ok = couch_file:sync(Fd),
-            {ok, Fd};
-        {error, enoent} ->
-            {not_found, no_db_file}
-        end;
-    Error ->
-        Error
+    Arg = {Engine, DbName, Filepath, Options},
+    case proc_lib:start_link(couch_db_updater, init, Arg) of
+        {ok, Pid} ->
+            gen_server:call(Pid, get_db);
+        Else ->
+            Else
     end.
 
 

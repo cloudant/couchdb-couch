@@ -35,24 +35,26 @@
     infos
 }).
 
-init({DbName, Filepath, Fd, Options}) ->
+
+init({Engine, DbName, FilePath, Options}) ->
     erlang:put(io_priority, {db_update, DbName}),
     case lists:member(create, Options) of
-    true ->
-        % create a new header and writes it to the file
-        Header =  couch_db_header:new(),
-        ok = couch_file:write_header(Fd, Header),
-        % delete any old compaction files that might be hanging around
-        RootDir = config:get("couchdb", "database_dir", "."),
-        couch_file:delete(RootDir, Filepath ++ ".compact"),
-        couch_file:delete(RootDir, Filepath ++ ".compact.data"),
-        couch_file:delete(RootDir, Filepath ++ ".compact.meta");
-    false ->
-        case couch_file:read_header(Fd) of
-        {ok, Header} ->
-            ok;
-        no_valid_header ->
-            % create a new header and writes it to the file
+        true ->
+            Header = couch_db_header:new(),
+            case Engine:create(FilePath, Header, Options) of
+                {ok, EngineState0} ->
+                    EngineState;
+                Else ->
+                    throw(Else)
+            end;
+        false ->
+            case Engine:open(FilePath, Options) of
+                {ok, EngineState} ->
+                    ok;
+                {error, empty_db} ->
+                    Header = couch_db_header:new(),
+                    Engine:store_header(Engine)
+                    % create a new header and writes it to the file
             Header =  couch_db_header:new(),
             ok = couch_file:write_header(Fd, Header),
             % delete any old compaction files that might be hanging around

@@ -13,10 +13,24 @@
 
 
 exists(FilePath) ->
-    asdf.
+    case filelib:is_file(FilePath) of
+        true ->
+            true;
+        false ->
+            filelib:is_file(FilePath ++ ".compact")
+    end.
 
 
-delete(FilePath) ->
+create(FilePath, Options) ->
+    % delete any old compaction files that might be hanging around
+    RootDir = config:get("couchdb", "database_dir", "."),
+    couch_file:delete(RootDir, Filepath ++ ".compact"),
+    couch_file:delete(RootDir, Filepath ++ ".compact.data"),
+    couch_file:delete(RootDir, Filepath ++ ".compact.meta");
+    
+
+
+delete(RootDir, FilePath, Async) ->
     %% Delete any leftover compaction files. If we don't do this a
     %% subsequent request for this DB will try to open them to use
     %% as a recovery.
@@ -24,9 +38,8 @@ delete(FilePath) ->
         couch_file:delete(Server#server.root_dir, FullFilepath ++ Ext)
     end, [".compact", ".compact.data", ".compact.meta"]),
 
-    
-
-    asdfd.
+    % Delete the actual database file
+    couch_file:delete(RootDir, FilePath, Async).
 
 
 init(...) ->
@@ -65,6 +78,18 @@ init(...) ->
     % race conditions.  Instead see couch_db:validate_doc_update, which loads
     % them lazily
     {ok, Db#db{main_pid = self()}}.
+
+
+asdf
+case open_db_file(Filepath, Options) of
+{ok, Fd} ->
+    {ok, UpdaterPid} = gen_server:start_link(couch_db_updater, {DbName,
+        Filepath, Fd, Options}, []),
+    unlink(Fd),
+    gen_server:call(UpdaterPid, get_db);
+Else ->
+    Else
+end.
 
 
 open_db_file(Filepath, Options) ->
