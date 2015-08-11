@@ -44,7 +44,7 @@
     "(\\.[0-9]{10,})?$" % but allow an optional shard timestamp at the end
 ).
 
-start_link(DbName, Filepath, Options) ->
+start_link(Engine, DbName, Filepath, Options) ->
     case open_db_file(Filepath, Options) of
     {ok, Fd} ->
         {ok, UpdaterPid} = gen_server:start_link(couch_db_updater, {DbName,
