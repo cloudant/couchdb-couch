@@ -439,7 +439,7 @@ flush_trees(#db{} = Db,
                 % and convert bins, removing the FD.
                 % All bins should have been written to disk already.
                 if AttsStream == nil -> ok; true ->
-                    case Engine:is_current_stream(AttsStream) of
+                    case Engine:is_current_stream(EngineState, AttsStream) of
                         true ->
                             ok;
                         false ->

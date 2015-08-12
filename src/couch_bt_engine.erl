@@ -159,8 +159,10 @@ store_security(#st{} = St, NewSecurity) ->
     set(St, security_ptr, Ptr).
 
 
-is_current_stream(St, StreamFd) ->
-    StreamFd == St#st.fd.
+is_current_stream(#st{} = St, StreamFd) ->
+    StreamFd == St#st.fd;
+is_current_stream(_, _) ->
+    false.
 
 
 write_summary(St, SummaryBinary) ->
