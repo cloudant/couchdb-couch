@@ -88,17 +88,30 @@ handle_call(cancel_compact, _From, #db{compactor_pid = Pid} = Db) ->
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
     {reply, ok, Db2};
 
-handle_call({set_security, NewSec}, _From, #db{compression = Comp} = Db) ->
-    {ok, Ptr, _} = couch_file:append_term(
-        Db#db.fd, NewSec, [{compression, Comp}]),
-    Db2 = commit_data(Db#db{security=NewSec, security_ptr=Ptr,
-            update_seq=Db#db.update_seq+1}),
+handle_call({set_security, NewSec}, _From, #db{} = Db) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    {ok, NewState1} = Engine:store_security(EngineState, NewSec),
+    {ok, NewState2} = Engine:increment_update_seq(NewState1),
+    {ok, NewState3} = Engine:commit_data(NewState2),
+    Db2 = Db#db{
+        engine = {Engine, NewState2},
+        security = NewSec
+    },
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
     {reply, ok, Db2};
 
 handle_call({set_revs_limit, Limit}, _From, Db) ->
-    Db2 = commit_data(Db#db{revs_limit=Limit,
-            update_seq=Db#db.update_seq+1}),
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    {ok, NewState1} = Engine:set(EngineState, revs_limit, Limit),
+    {ok, NewState2} = Engine:increment_update_seq(NewState1),
+    {ok, NewState3} = Engine:commit_data(NewState2),
+    Db2 = Db#db{
+        engine = {Engine, NewState3}
+    },
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
     {reply, ok, Db2};
 
@@ -107,72 +120,73 @@ handle_call({purge_docs, _IdRevs}, _From,
     {reply, {error, purge_during_compaction}, Db};
 handle_call({purge_docs, IdRevs}, _From, Db) ->
     #db{
-        fd = Fd,
-        id_tree = DocInfoByIdBTree,
-        seq_tree = DocInfoBySeqBTree,
-        update_seq = LastSeq,
-        header = Header,
-        compression = Comp
-        } = Db,
-    DocLookups = couch_btree:lookup(DocInfoByIdBTree,
-            [Id || {Id, _Revs} <- IdRevs]),
+        engine = {Engine, EngineState}
+    } = Db,
 
-    NewDocInfos = lists:zipwith(
-        fun({_Id, Revs}, {ok, #full_doc_info{rev_tree=Tree}=FullDocInfo}) ->
+    DocIds = [Id || {Id, _Revs} <- IdRevs],
+    OldDocInfos = Engine:open_docs(EngineState, DocIds),
+
+    NewDocInfos = lists:flatmap(fun
+        ({{_Id, Revs}, #full_doc_info{rev_tree = Tree} = FDI}) ->
             case couch_key_tree:remove_leafs(Tree, Revs) of
-            {_, []=_RemovedRevs} -> % no change
-                nil;
-            {NewTree, RemovedRevs} ->
-                {FullDocInfo#full_doc_info{rev_tree=NewTree},RemovedRevs}
+                {_, [] = _RemovedRevs} -> % no change
+                    [];
+                {NewTree, RemovedRevs} ->
+                    NewFDI = FDI#full_doc_info{rev_tree = NewTree},
+                    [{NewFDI, RemovedRevs}]
             end;
         (_, not_found) ->
-            nil
-        end,
-        IdRevs, DocLookups),
+            []
+    end, lists:zip(IdRevs, OldDocInfos)),
 
-    SeqsToRemove = [Seq
-            || {#full_doc_info{update_seq=Seq},_} <- NewDocInfos],
+    InitAcc = {Engine:get(EngineState, update_seq), [], [], []},
+    FinalAcc = lists:foldl(fun({#full_doc_info{} = OldFDI, RemRevs}, Acc) ->
+        #full_doc_info{
+            id = Id,
+            update_seq = RemSeq,
+            rev_tree = OldTree
+        } = OldFDI,
+        {SeqAcc, FDIAcc, RemSeqAcc, IdRevsAcc} = Acc,
 
-    FullDocInfoToUpdate = [FullInfo
-            || {#full_doc_info{rev_tree=Tree}=FullInfo,_}
-            <- NewDocInfos, Tree /= []],
+        % Its possible to purge the #leaf{} that contains
+        % the update_seq where this doc sits in the update_seq
+        % sequence. Rather than do a bunch of complicated checks
+        % we just re-label every #leaf{} and reinsert it into
+        % the update_seq sequence.
+        {NewTree, NewSeqAcc} = couch_key_tree:mapfold(fun
+            (_RevId, Leaf, leaf, InnerSeqAcc) ->
+                {Leaf#leaf{seq = InnerSeqAcc + 1}, InnerSeqAcc + 1}
+            (_RevId, Value, _Type, InnerSeqAcc) ->
+                {Value, InnerSeqAcc}
+        end, SeqAcc, Tree),
 
-    IdRevsPurged = [{Id, Revs}
-            || {#full_doc_info{id=Id}, Revs} <- NewDocInfos],
+        NewFDI = OldFDI#full_doc_info{
+            update_seq = NewSeqAcc,
+            rev_tree = NewTree
+        },
+        
+        NewFDIAcc = [NewFDI | FDIAcc],
+        NewRemSeqAcc = [RemSeq | RemSeqAcc],
+        NewIdRevsAcc = [{Id, RemRevs} | IdRevsAcc],
+        {NewSeqAcc, NewFDIAcc, NewRemSeqacc, NewIdRevsAcc}
+    end, InitAcc, NewDocInfos)
 
-    {DocInfoToUpdate, NewSeq} = lists:mapfoldl(
-        fun(#full_doc_info{rev_tree=Tree}=FullInfo, SeqAcc) ->
-            Tree2 = couch_key_tree:map_leafs(
-                fun(_RevId, Leaf) ->
-                    Leaf#leaf{seq=SeqAcc+1}
-                end, Tree),
-            {FullInfo#full_doc_info{rev_tree=Tree2}, SeqAcc + 1}
-        end, LastSeq, FullDocInfoToUpdate),
+    {FinalSeq, FDIs, RemSeqs, PurgedIdRevs} = FinalAcc,
 
-    IdsToRemove = [Id || {#full_doc_info{id=Id,rev_tree=[]},_}
-            <- NewDocInfos],
+    {ok, NewState1} = Engine:set(EngineState, update_seq, FinalSeq + 1)
+    {ok, NewState2} = Engine:update_docs(NewState1, FDIs, RemSeqs),
+    {ok, NewState3} = Engine:store_purged(NewState2, PurgedIdRevs),
+    {ok, NewState4} = Engine:commit_data(NewState3),
 
-    {ok, DocInfoBySeqBTree2} = couch_btree:add_remove(DocInfoBySeqBTree,
-            DocInfoToUpdate, SeqsToRemove),
-    {ok, DocInfoByIdBTree2} = couch_btree:add_remove(DocInfoByIdBTree,
-            FullDocInfoToUpdate, IdsToRemove),
-    {ok, Pointer, _} = couch_file:append_term(
-            Fd, IdRevsPurged, [{compression, Comp}]),
-
-    NewHeader = couch_db_header:set(Header, [
-        {purge_seq, couch_db_header:purge_seq(Header) + 1},
-        {purged_docs, Pointer}
-    ]),
-    Db2 = commit_data(
-        Db#db{
-            id_tree = DocInfoByIdBTree2,
-            seq_tree = DocInfoBySeqBTree2,
-            update_seq = NewSeq + 1,
-            header=NewHeader}),
+    Db2 = Db#db{
+        engine = {Engine, NewState4}
+    },
 
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
     couch_event:notify(Db#db.name, updated),
-    {reply, {ok, couch_db_header:purge_seq(NewHeader), IdRevsPurged}, Db2}.
+
+    PurgeSeq = Engine:get(NewState4, purge_seq),
+    {reply, {ok, PurgeSeq, PurgedIdRevs}, Db2}.
 
 
 handle_cast({load_validation_funs, ValidationFuns}, Db) ->
@@ -263,9 +277,9 @@ handle_info({update_docs, Client, GroupedDocs, NonRepDocs, MergeConflicts,
                 FullCommit2) of
     {ok, Db2, UpdatedDDocIds} ->
         ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
-        if Db2#db.update_seq /= Db#db.update_seq ->
-            couch_event:notify(Db2#db.name, updated);
-        true -> ok
+        case {get_update_seq(Db), get_update_seq(Db2)} of
+            {Seq, Seq} -> ok;
+            _ -> couch_event:notify(Db2#db.name, updated)
         end,
         [catch(ClientPid ! {done, self()}) || ClientPid <- Clients],
         Db3 = case length(UpdatedDDocIds) > 0 of
@@ -408,35 +422,40 @@ refresh_validate_doc_funs(Db0) ->
 
 flush_trees(_Db, [], AccFlushedTrees) ->
     {ok, lists:reverse(AccFlushedTrees)};
-flush_trees(#db{fd = Fd} = Db,
+flush_trees(#db{} = Db,
         [InfoUnflushed | RestUnflushed], AccFlushed) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
     #full_doc_info{update_seq=UpdateSeq, rev_tree=Unflushed} = InfoUnflushed,
     {Flushed, FinalAcc} = couch_key_tree:mapfold(
         fun(_Rev, Value, Type, SizesAcc) ->
             case Value of
             #doc{deleted = IsDeleted, body = {summary, _, _, _} = DocSummary} ->
-                {summary, Summary, AttSizeInfo, AttsFd} = DocSummary,
+                {summary, Summary, AttSizeInfo, AttsStream} = DocSummary,
                 % this node value is actually an unwritten document summary,
                 % write to disk.
                 % make sure the Fd in the written bins is the same Fd we are
                 % and convert bins, removing the FD.
                 % All bins should have been written to disk already.
-                case {AttsFd, Fd} of
-                {nil, _} ->
-                    ok;
-                {SameFd, SameFd} ->
-                    ok;
-                _ ->
-                    % Fd where the attachments were written to is not the same
-                    % as our Fd. This can happen when a database is being
-                    % switched out during a compaction.
-                    couch_log:debug("File where the attachments are written has"
-                                    " changed. Possibly retrying.", []),
-                    throw(retry)
+                if AttsStream == nil -> ok; true ->
+                    case Engine:is_current_stream(AttsStream) of
+                        true ->
+                            ok;
+                        false ->
+                            % Stream where the attachments were written to is
+                            % no longer the current attachment stream. This
+                            % can happen when a database is switched at
+                            % compaction time.
+                            couch_log:debug("Stream where the attachments are"
+                                            " written has changed."
+                                            " Possibly retrying.", []),
+                            throw(retry)
+                    end
                 end,
                 ExternalSize = ?term_size(Summary),
-                {ok, NewSummaryPointer, SummarySize} =
-                    couch_file:append_raw_chunk(Fd, Summary),
+                {ok, NewState, NewSummaryPointer, SummarySize} =
+                    Engine:write_summary(EngineStaet, Summary),
                 Leaf = #leaf{
                     deleted = IsDeleted,
                     ptr = NewSummaryPointer,
@@ -609,37 +628,38 @@ stem_full_doc_infos(#db{revs_limit=Limit}, DocInfos) ->
 
 update_docs_int(Db, DocsList, NonRepDocs, MergeConflicts, FullCommit) ->
     #db{
-        id_tree = DocInfoByIdBTree,
-        seq_tree = DocInfoBySeqBTree,
-        update_seq = LastSeq,
-        revs_limit = RevsLimit
-        } = Db,
+        engine = {Engine, EngineState}
+    } = Db,
+
+    UpdateSeq = Engine:get(EngineState, update_seq),
+    RevsLimit = Engine:get(EngineState, revs_limit),
+
     Ids = [Id || [{_Client, #doc{id=Id}}|_] <- DocsList],
     % lookup up the old documents, if they exist.
-    OldDocLookups = couch_btree:lookup(DocInfoByIdBTree, Ids),
-    OldDocInfos = lists:zipwith(
-        fun(_Id, {ok, FullDocInfo}) ->
-            FullDocInfo;
+    OldDocLookups = Engine:open_docs(EngineState, Ids),
+    OldDocInfos = lists:zipwith(fun
+        (_Id, #full_doc_info{} = FDI}) ->
+            FDI;
         (Id, not_found) ->
             #full_doc_info{id=Id}
-        end,
-        Ids, OldDocLookups),
+    end, Ids, OldDocLookups),
     % Merge the new docs into the revision trees.
     {ok, NewFullDocInfos, RemoveSeqs, NewSeq} = merge_rev_trees(RevsLimit,
             MergeConflicts, DocsList, OldDocInfos, [], [], LastSeq),
 
-    % All documents are now ready to write.
-
-    {ok, Db2}  = update_local_docs(Db, NonRepDocs),
-
     % Write out the document summaries (the bodies are stored in the nodes of
     % the trees, the attachments are already written to disk)
-    {ok, IndexFullDocInfos} = flush_trees(Db2, NewFullDocInfos, []),
+    {ok, IndexFDIs} = flush_trees(Db2, NewFullDocInfos, []),
 
-    % and the indexes
-    {ok, DocInfoByIdBTree2} = couch_btree:add_remove(DocInfoByIdBTree, IndexFullDocInfos, []),
-    {ok, DocInfoBySeqBTree2} = couch_btree:add_remove(DocInfoBySeqBTree, IndexFullDocInfos, RemoveSeqs),
+    NewNonRepDocs = update_local_doc_revs(NonRepDocs),
 
+    {ok, NewState1} = Engine:write_doc_info(
+            EngineState, IndexFDIs, RemSeqs, NewNonRepDocs),
+    {ok, NewState2} = Engine:set(NewState1, update_seq, NewSeq),
+
+    Db2 = Db#db{
+        engine = {Engine, NewState2}
+    },
 
     WriteCount = length(IndexFullDocInfos),
     couch_stats:increment_counter([couchdb, document_inserts],
@@ -650,11 +670,6 @@ update_docs_int(Db, DocsList, NonRepDocs, MergeConflicts, FullCommit) ->
         length(NonRepDocs)
     ),
 
-    Db3 = Db2#db{
-        id_tree = DocInfoByIdBTree2,
-        seq_tree = DocInfoBySeqBTree2,
-        update_seq = NewSeq},
-
     % Check if we just updated any design documents, and update the validation
     % funs if we did.
     UpdatedDDocIds = lists:flatmap(fun
@@ -662,53 +677,41 @@ update_docs_int(Db, DocsList, NonRepDocs, MergeConflicts, FullCommit) ->
         (_) -> []
     end, Ids),
 
-    Db4 = case length(UpdatedDDocIds) > 0 of
+    Db3 = case length(UpdatedDDocIds) > 0 of
         true ->
             couch_event:notify(Db3#db.name, ddoc_updated),
             ddoc_cache:evict(Db3#db.name, UpdatedDDocIds),
-            refresh_validate_doc_funs(Db3);
+            refresh_validate_doc_funs(Db2);
         false ->
-            Db3
+            Db2
     end,
 
-    {ok, commit_data(Db4, not FullCommit), UpdatedDDocIds}.
+    {ok, commit_data(Db3, not FullCommit), UpdatedDDocIds}.
 
-update_local_docs(Db, []) ->
-    {ok, Db};
-update_local_docs(#db{local_tree=Btree}=Db, Docs) ->
-    BtreeEntries = lists:map(
-        fun({Client, NewDoc}) ->
-            #doc{
-                id = Id,
-                deleted = Delete,
-                revs = {0, PrevRevs},
-                body = Body
-            } = NewDoc,
-            case PrevRevs of
-            [RevStr|_] ->
+
+update_local_doc_revs(Docs) ->
+    lists:map(fun({Client, NewDoc}) ->
+        #doc{
+            deleted = Delete,
+            revs = {0, PrevRevs}
+        } = NewDoc,
+        case PrevRevs of
+            [RevStr | _] ->
                 PrevRev = list_to_integer(?b2l(RevStr));
             [] ->
                 PrevRev = 0
-            end,
-            case Delete of
-                false ->
-                    send_result(Client, NewDoc, {ok,
-                        {0, ?l2b(integer_to_list(PrevRev + 1))}}),
-                    {update, {Id, {PrevRev + 1, Body}}};
-                true  ->
-                    send_result(Client, NewDoc,
-                        {ok, {0, <<"0">>}}),
-                    {remove, Id}
-            end
-        end, Docs),
-
-    BtreeIdsRemove = [Id || {remove, Id} <- BtreeEntries],
-    BtreeIdsUpdate = [{Key, Val} || {update, {Key, Val}} <- BtreeEntries],
-
-    {ok, Btree2} =
-        couch_btree:add_remove(Btree, BtreeIdsUpdate, BtreeIdsRemove),
-
-    {ok, Db#db{local_tree = Btree2}}.
+        end,
+        NewRev = case Delete of
+            false ->
+                {0, ?l2b(integer_to_list(PrevRev + 1))};
+            true  ->
+                {0, <<"0">>}
+        end,
+        send_result(Client, NewDoc, {ok, NewRev}),
+        NewDoc#doc{
+            revs = {0, [NewRev]}
+        }
+    end, Docs).
 
 
 commit_data(Db) ->
@@ -740,6 +743,13 @@ maybe_track_db(#db{options = Options}) ->
         false ->
             couch_stats_process_tracker:track([couchdb, open_databases]);
     end.
+
+
+get_update_seq(Db) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:get(EngineState, update_seq).
 
 
 copy_doc_attachments(#db{fd = SrcFd} = SrcDb, SrcSp, DestFd) ->

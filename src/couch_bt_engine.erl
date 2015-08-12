@@ -148,6 +148,32 @@ set(#st{} = St, DbProp, Value) ->
     }}.
 
 
+increment_update_seq(#st{} = St) ->
+    Current = ?MODULE:get(St, update_seq),
+    ?MODULE:set(St, update_seq, Current + 1).
+
+
+store_security(#st{} = St, NewSecurity) ->
+    Options = [{compression, St#st.compression}],
+    {ok, Ptr, _} = couch_file:append_term(St#st.fd, NewSecurity, Options),
+    set(St, security_ptr, Ptr).
+
+
+is_current_stream(St, StreamFd) ->
+    StreamFd == St#st.fd.
+
+
+write_summary(St, SummaryBinary) ->
+    #st{
+        fd = Fd
+    } = St,
+    couch_file:append_raw_chunk(Fd, SummaryBinary).
+
+
+write_doc_infos(St, FullDocInfos, RemoveSeqs, LocalDocs) ->
+    ok.
+
+
 id_tree_split(#full_doc_info{}=Info) ->
     #full_doc_info{
         id = Id,
