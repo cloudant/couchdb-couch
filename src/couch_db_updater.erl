@@ -56,14 +56,9 @@ init({Engine, DbName, FilePath, Options}) ->
     end.
 
 
-terminate(_Reason, Db) ->
-    % If the reason we died is because our fd disappeared
-    % then we don't need to try closing it again.
-    if Db#db.fd_monitor == closed -> ok; true ->
-        ok = couch_file:close(Db#db.fd)
-    end,
-    couch_util:shutdown_sync(Db#db.compactor_pid),
-    couch_util:shutdown_sync(Db#db.fd),
+terminate(Reason, Db) ->
+    {Engine, EngineState} = Db#db.engine,
+    Engine:terminate(Reason, EngineState),
     ok.
 
 handle_call(get_db, _From, Db) ->
@@ -369,79 +364,37 @@ collect_updates(GroupedDocsAcc, ClientsAcc, MergeConflicts, FullCommit) ->
 
 
 init_db(DbName, Engine, EngineState, Options) ->
-    Header = couch_db_header:upgrade(Header0),
-
     DefaultFSync = "[before_header, after_header, on_file_open]"
     FsyncStr = config:get("couchdb", "fsync_options", DefaultFSync),
     {ok, FsyncOptions} = couch_util:parse_term(FsyncStr),
 
     case lists:member(on_file_open, FsyncOptions) of
-        true -> ok = couch_file:sync(Fd);
+        true -> ok = Engine:sync(EngineState);
         _ -> ok
     end,
 
-    Compression = couch_compress:get_compression_method(),
-
-    IdTreeState = couch_db_header:id_tree_state(Header),
-    SeqTreeState = couch_db_header:seq_tree_state(Header),
-    LocalTreeState = couch_db_header:local_tree_state(Header),
-    {ok, IdBtree} = couch_btree:open(IdTreeState, Fd,
-        [{split, fun ?MODULE:btree_by_id_split/1},
-        {join, fun ?MODULE:btree_by_id_join/2},
-        {reduce, fun ?MODULE:btree_by_id_reduce/2},
-        {compression, Compression}]),
-    {ok, SeqBtree} = couch_btree:open(SeqTreeState, Fd,
-            [{split, fun ?MODULE:btree_by_seq_split/1},
-            {join, fun ?MODULE:btree_by_seq_join/2},
-            {reduce, fun ?MODULE:btree_by_seq_reduce/2},
-            {compression, Compression}]),
-    {ok, LocalDocsBtree} = couch_btree:open(LocalTreeState, Fd,
-        [{compression, Compression}]),
-    case couch_db_header:security_ptr(Header) of
-    nil ->
-        Security = [],
-        SecurityPtr = nil;
-    SecurityPtr ->
-        {ok, Security} = couch_file:pread_term(Fd, SecurityPtr)
-    end,
     % convert start time tuple to microsecs and store as a binary string
     {MegaSecs, Secs, MicroSecs} = os:timestamp(),
     StartTime = ?l2b(io_lib:format("~p",
             [(MegaSecs*1000000*1000000) + (Secs*1000000) + MicroSecs])),
-    ok = couch_file:set_db_pid(Fd, self()),
-    Db = #db{
-        fd=Fd,
-        fd_monitor = erlang:monitor(process, Fd),
-        header=Header,
-        id_tree = IdBtree,
-        seq_tree = SeqBtree,
-        local_tree = LocalDocsBtree,
-        committed_update_seq = couch_db_header:update_seq(Header),
-        update_seq = couch_db_header:update_seq(Header),
+
+    BDU = couch_util:get_value(before_doc_update, Options, nil),
+    ADR = couch_util:get_value(after_doc_read, Options, nil),
+
+    #db{
         name = DbName,
-        filepath = Filepath,
-        security = Security,
-        security_ptr = SecurityPtr,
+        engine = {Engine, EngineState},
+        committed_update_seq = Engine:get(EngineState, commited_update_seq),
+        update_seq = Engine:get(EngineState, update_seq),
+        security = Engine:get(EngineState, security, []),
         instance_start_time = StartTime,
-        revs_limit = couch_db_header:revs_limit(Header),
+        revs_limit = Engine:get(EngineState, revs_limit, 1000),
         fsync_options = FsyncOptions,
         options = Options,
-        compression = Compression,
-        before_doc_update = couch_util:get_value(before_doc_update, Options, nil),
-        after_doc_read = couch_util:get_value(after_doc_read, Options, nil)
-    },
-
-    % If we just created a new UUID while upgrading a
-    % database then we want to flush that to disk or
-    % we risk sending out the uuid and having the db
-    % crash which would result in it generating a new
-    % uuid each time it was reopened.
-    case Header /= Header0 of
-        true ->
-            sync_header(Db, Header);
-        false ->
-            Db
-    end.
+        compression = couch_compress:get_compression_method(),
+        before_doc_update = BDU,
+        after_doc_read = ADR
+    }.
 
 
 close_db(#db{fd_monitor = Ref}) ->

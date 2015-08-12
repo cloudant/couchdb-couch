@@ -2,6 +2,19 @@
 
 
 -export([
+    exists/1,
+    init/2,
+    delete/3,
+
+    sync/1,
+
+    get/2,
+    get/3,
+    set/3
+]).
+
+
+-export([
 
     id_tree_split/1,
     id_tree_join/2,
@@ -25,8 +38,6 @@
 }).
 
 
-
-
 exists(FilePath) ->
     case filelib:is_file(FilePath) of
         true ->
@@ -34,24 +45,6 @@ exists(FilePath) ->
         false ->
             filelib:is_file(FilePath ++ ".compact")
     end.
-
-
-create(FilePath, Options) ->
-    % Delete any old compaction files that might be hanging around
-    RootDir = config:get("couchdb", "database_dir", "."),
-    delete_compact_files(RootDir, FilePath).    
-
-
-delete(RootDir, FilePath, Async) ->
-    %% Delete any leftover compaction files. If we don't do this a
-    %% subsequent request for this DB will try to open them to use
-    %% as a recovery.
-    lists:foreach(fun(Ext) ->
-        couch_file:delete(Server#server.root_dir, FullFilepath ++ Ext)
-    end, [".compact", ".compact.data", ".compact.meta"]),
-
-    % Delete the actual database file
-    couch_file:delete(RootDir, FilePath, Async).
 
 
 init(FilePath, Options) ->
@@ -79,6 +72,44 @@ init(FilePath, Options) ->
     % race conditions.  Instead see couch_db:validate_doc_update, which loads
     % them lazily
     {ok, Db#db{main_pid = self()}}.
+
+terminute(_Reason, St) ->
+    % If the reason we died is because our fd disappeared
+    % then we don't need to try closing it again.
+    if St#st.fd_monitor == closed -> ok; true ->
+        ok = couch_file:close(Db#db.fd)
+    end,
+    couch_util:shutdown_sync(Fd),
+    ok.
+
+
+delete(RootDir, FilePath, Async) ->
+    %% Delete any leftover compaction files. If we don't do this a
+    %% subsequent request for this DB will try to open them to use
+    %% as a recovery.
+    lists:foreach(fun(Ext) ->
+        couch_file:delete(Server#server.root_dir, FullFilepath ++ Ext)
+    end, [".compact", ".compact.data", ".compact.meta"]),
+
+    % Delete the actual database file
+    couch_file:delete(RootDir, FilePath, Async).
+
+
+sync(#st{fd = Fd}) ->
+    ok = couch_file:sync(Fd).
+
+
+get(#st{} = St, DbProp) ->
+    ?MODULE:get(St, DbProp, undefined).
+
+
+get(#st{header = Header}, DbProp, Default) ->
+    couch_bt_engine_header:get_db_prop(Header, DbProp, Default).
+
+
+set(#st{header = Header}, DbProp, Value) ->
+    NewHeader = couch_bt_engine_header:set_db_prop(Header, DbProp, Value),
+    {ok, #st{header = NewHeader}}.
 
 
 id_tree_split(#full_doc_info{}=Info) ->
