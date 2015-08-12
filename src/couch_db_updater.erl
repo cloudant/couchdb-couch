@@ -87,11 +87,6 @@ handle_call(cancel_compact, _From, #db{compactor_pid = Pid} = Db) ->
     Db2 = Db#db{compactor_pid = nil},
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
     {reply, ok, Db2};
-handle_call(increment_update_seq, _From, Db) ->
-    Db2 = commit_data(Db#db{update_seq=Db#db.update_seq+1}),
-    ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
-    couch_event:notify(Db#db.name, updated),
-    {reply, {ok, Db2#db.update_seq}, Db2};
 
 handle_call({set_security, NewSec}, _From, #db{compression = Comp} = Db) ->
     {ok, Ptr, _} = couch_file:append_term(

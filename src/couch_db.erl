@@ -24,7 +24,7 @@
 -export([get_uuid/1, get_epochs/1, get_compacted_seq/1]).
 -export([enum_docs/4,enum_docs_since/5]).
 -export([enum_docs_since_reduce_to_count/1,enum_docs_reduce_to_count/1]).
--export([increment_update_seq/1,get_purge_seq/1,purge_docs/2,get_last_purged/1]).
+-export([get_purge_seq/1,purge_docs/2,get_last_purged/1]).
 -export([start_link/3,open_doc_int/3,ensure_full_commit/1,ensure_full_commit/2]).
 -export([set_security/2,get_security/1]).
 -export([changes_since/4,changes_since/5,read_doc/2,new_revid/1]).
@@ -265,9 +265,6 @@ get_full_doc_info(Db, Id) ->
 
 get_full_doc_infos(Db, Ids) ->
     couch_btree:lookup(Db#db.id_tree, Ids).
-
-increment_update_seq(#db{main_pid=Pid}) ->
-    gen_server:call(Pid, increment_update_seq).
 
 purge_docs(#db{main_pid=Pid}, IdsRevs) ->
     gen_server:call(Pid, {purge_docs, IdsRevs}).
