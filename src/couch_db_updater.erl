@@ -364,15 +364,6 @@ collect_updates(GroupedDocsAcc, ClientsAcc, MergeConflicts, FullCommit) ->
 
 
 init_db(DbName, Engine, EngineState, Options) ->
-    DefaultFSync = "[before_header, after_header, on_file_open]"
-    FsyncStr = config:get("couchdb", "fsync_options", DefaultFSync),
-    {ok, FsyncOptions} = couch_util:parse_term(FsyncStr),
-
-    case lists:member(on_file_open, FsyncOptions) of
-        true -> ok = Engine:sync(EngineState);
-        _ -> ok
-    end,
-
     % convert start time tuple to microsecs and store as a binary string
     {MegaSecs, Secs, MicroSecs} = os:timestamp(),
     StartTime = ?l2b(io_lib:format("~p",
@@ -384,7 +375,7 @@ init_db(DbName, Engine, EngineState, Options) ->
     #db{
         name = DbName,
         engine = {Engine, EngineState},
-        committed_update_seq = Engine:get(EngineState, commited_update_seq),
+        committed_update_seq = Engine:get(EngineState, update_seq),
         update_seq = Engine:get(EngineState, update_seq),
         security = Engine:get(EngineState, security, []),
         instance_start_time = StartTime,
@@ -724,56 +715,26 @@ update_local_docs(#db{local_tree=Btree}=Db, Docs) ->
 
     {ok, Db#db{local_tree = Btree2}}.
 
-db_to_header(Db, Header) ->
-    couch_db_header:set(Header, [
-        {update_seq, Db#db.update_seq},
-        {seq_tree_state, couch_btree:get_state(Db#db.seq_tree)},
-        {id_tree_state, couch_btree:get_state(Db#db.id_tree)},
-        {local_tree_state, couch_btree:get_state(Db#db.local_tree)},
-        {security_ptr, Db#db.security_ptr},
-        {revs_limit, Db#db.revs_limit}
-    ]).
 
 commit_data(Db) ->
     commit_data(Db, false).
 
-commit_data(#db{waiting_delayed_commit=nil} = Db, true) ->
-    TRef = erlang:send_after(1000,self(),delayed_commit),
-    Db#db{waiting_delayed_commit=TRef};
+commit_data(#db{waiting_delayed_commit = nil} = Db, true) ->
+    TRef = erlang:send_after(1000, self(), delayed_commit),
+    Db#db{waiting_delayed_commit = TRef};
 commit_data(Db, true) ->
     Db;
 commit_data(Db, _) ->
     #db{
-        header = OldHeader,
+        engine = {Engine, EngineState},
         waiting_delayed_commit = Timer
     } = Db,
     if is_reference(Timer) -> erlang:cancel_timer(Timer); true -> ok end,
-    case db_to_header(Db, OldHeader) of
-        OldHeader -> Db#db{waiting_delayed_commit=nil};
-        NewHeader -> sync_header(Db, NewHeader)
-    end.
-
-sync_header(Db, NewHeader) ->
-    #db{
-        fd = Fd,
-        filepath = FilePath,
-        fsync_options = FsyncOptions,
-        waiting_delayed_commit = Timer
-    } = Db,
-
-    if is_reference(Timer) -> erlang:cancel_timer(Timer); true -> ok end,
-
-    Before = lists:member(before_header, FsyncOptions),
-    After = lists:member(after_header, FsyncOptions),
-
-    if Before -> couch_file:sync(FilePath); true -> ok end,
-    ok = couch_file:write_header(Fd, NewHeader),
-    if After -> couch_file:sync(FilePath); true -> ok end,
-
+    NewState = Engine:commit_data(EngineState),
     Db#db{
-        header=NewHeader,
-        committed_update_seq=Db#db.update_seq,
-        waiting_delayed_commit=nil
+        engine = {Engine, NewState},
+        waiting_delayed_commit = nil,
+        committed_update_seq = Engine:get(NewState, update_seq),
     }.
 
 

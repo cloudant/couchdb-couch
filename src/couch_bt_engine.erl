@@ -31,7 +31,9 @@
     filepath,
     fd,
     fd_monitor,
+    fsync_options,
     header,
+    needs_commit,
     id_tree,
     seq_tree,
     local_tree
@@ -73,7 +75,7 @@ init(FilePath, Options) ->
     % them lazily
     {ok, Db#db{main_pid = self()}}.
 
-terminute(_Reason, St) ->
+terminate(_Reason, St) ->
     % If the reason we died is because our fd disappeared
     % then we don't need to try closing it again.
     if St#st.fd_monitor == closed -> ok; true ->
@@ -99,17 +101,51 @@ sync(#st{fd = Fd}) ->
     ok = couch_file:sync(Fd).
 
 
+commit_data(St) ->
+    #st{
+        fd = Fd,
+        filepath = FilePath,
+        fsync_options = FsyncOptions,
+        header = OldHeader,
+        needs_commit = NeedsCommit
+    } = St,
+
+    NewHeader = update_header(St, OldHeader),
+
+    case NewHeader /= OldHeader orelse NeedsCommit of
+        true ->
+            Before = lists:member(before_header, FsyncOptions),
+            After = lists:member(after_header, FsyncOptions),
+
+            if Before -> couch_file:sync(Fd); true -> ok end,
+            ok = couch_file:write_header(Fd, NewHeader),
+            if After -> couch_file:sync(Fd); true -> ok end,
+
+            St#st{
+                header = NewHeader,
+                needs_commit = false
+            };
+        false ->
+            St
+    end.
+
+
 get(#st{} = St, DbProp) ->
     ?MODULE:get(St, DbProp, undefined).
 
 
 get(#st{header = Header}, DbProp, Default) ->
-    couch_bt_engine_header:get_db_prop(Header, DbProp, Default).
+    couch_bt_engine_header:get(Header, DbProp, Default).
 
 
-set(#st{header = Header}, DbProp, Value) ->
-    NewHeader = couch_bt_engine_header:set_db_prop(Header, DbProp, Value),
-    {ok, #st{header = NewHeader}}.
+set(#st{} = St, DbProp, Value) ->
+    #st{
+        header = Header
+    } = St,
+    {ok, #st{
+        header = couch_bt_engine_header:set(Header, DbProp, Value),
+        needs_commit = true
+    }}.
 
 
 id_tree_split(#full_doc_info{}=Info) ->
@@ -181,7 +217,7 @@ seq_tree_join(Seq, {Id, Del, Sizes, DiskTree}) when is_integer(Del) ->
         rev_tree = rev_tree(DiskTree)
     };
 
-seq_tre_join(KeySeq, {Id, RevInfos, DeletedRevInfos}) ->
+seq_tree_join(KeySeq, {Id, RevInfos, DeletedRevInfos}) ->
     % Older versions stored #doc_info records in the seq_tree.
     % Compact to upgrade.
     Revs = lists:map(fun({Rev, Seq, Bp}) ->
@@ -227,6 +263,15 @@ open_db_file(FilePath, Options) ->
 
 
 init_state(FilePath, Fd, Header0, Options) ->
+    DefaultFSync = "[before_header, after_header, on_file_open]"
+    FsyncStr = config:get("couchdb", "fsync_options", DefaultFSync),
+    {ok, FsyncOptions} = couch_util:parse_term(FsyncStr),
+
+    case lists:member(on_file_open, FsyncOptions) of
+        true -> ok = Engine:sync(EngineState);
+        _ -> ok
+    end,
+
     Header = couch_bt_engine_header:upgrade(Header0),
     Compression = couch_compress:get_compression_method(),
 
@@ -257,7 +302,9 @@ init_state(FilePath, Fd, Header0, Options) ->
         filepath = FilePath,
         fd = Fd,
         fd_monitor = erlang:monitor(process, Fd),
+        fsync_options = FsyncOptions,
         header = Header,
+        needs_commit = false,
         id_tree = IdBtree,
         seq_tree = SeqBtree,
         local_tree = LocalDocsBtree
@@ -274,6 +321,15 @@ init_state(FilePath, Fd, Header0, Options) ->
         false ->
             {ok, St}
     end.
+
+
+update_header(St, Header) ->
+    couch_bt_engine_header:set(Header, [
+        {seq_tree_state, couch_btree:get_state(St#st.seq_tree)},
+        {id_tree_state, couch_btree:get_state(St#st.id_tree)},
+        {local_tree_state, couch_btree:get_state(St#st.local_tree)}
+    ]).
+
 
 delete_compaction_files(FilePath) ->
     RootDir = config:get("couchdb", "database_dir", "."),
