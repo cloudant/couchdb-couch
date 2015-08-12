@@ -38,42 +38,22 @@
 
 init({Engine, DbName, FilePath, Options}) ->
     erlang:put(io_priority, {db_update, DbName}),
-    case lists:member(create, Options) of
-        true ->
-            Header = couch_db_header:new(),
-            case Engine:create(FilePath, Header, Options) of
-                {ok, EngineState0} ->
-                    EngineState;
-                Else ->
-                    throw(Else)
-            end;
-        false ->
-            case Engine:open(FilePath, Options) of
-                {ok, EngineState} ->
-                    ok;
-                {error, empty_db} ->
-                    Header = couch_db_header:new(),
-                    Engine:store_header(Engine)
-                    % create a new header and writes it to the file
-            Header =  couch_db_header:new(),
-            ok = couch_file:write_header(Fd, Header),
-            % delete any old compaction files that might be hanging around
-            file:delete(Filepath ++ ".compact"),
-            file:delete(Filepath ++ ".compact.data"),
-            file:delete(Filepath ++ ".compact.meta")
-        end
-    end,
-    Db = init_db(DbName, Filepath, Fd, Header, Options),
-    case lists:member(sys_db, Options) of
-        false ->
-            couch_stats_process_tracker:track([couchdb, open_databases]);
-        true ->
-            ok
-    end,
-    % we don't load validation funs here because the fabric query is liable to
-    % race conditions.  Instead see couch_db:validate_doc_update, which loads
-    % them lazily
-    {ok, Db#db{main_pid = self()}}.
+    try
+        Db = case Engine:init(DbName, FilePath, Options) of
+            {ok, EngineState0} ->
+                init_db(DbName, Engine, EngineState, Options);
+            Error ->
+                throw(Error)
+        end,
+        maybe_track_db(Db),
+        % we don't load validation funs here because the fabric query is liable to
+        % race conditions.  Instead see couch_db:validate_doc_update, which loads
+        % them lazily
+        proc_lib:init_ack({ok, Db#db{main_pid = self()}})
+    catch
+        throw:Error ->
+            proc_lib:init_ack(Error)
+    end.
 
 
 terminate(_Reason, Db) ->
@@ -387,167 +367,17 @@ collect_updates(GroupedDocsAcc, ClientsAcc, MergeConflicts, FullCommit) ->
         {GroupedDocsAcc, ClientsAcc, FullCommit}
     end.
 
-rev_tree(DiskTree) ->
-    couch_key_tree:map(fun
-        (_RevId, {Del, Ptr, Seq}) ->
-            #leaf{
-                deleted = ?i2b(Del),
-                ptr = Ptr,
-                seq = Seq
-            };
-        (_RevId, {Del, Ptr, Seq, Size}) ->
-            #leaf{
-                deleted = ?i2b(Del),
-                ptr = Ptr,
-                seq = Seq,
-                sizes = upgrade_sizes(Size)
-            };
-        (_RevId, {Del, Ptr, Seq, Sizes, Atts}) ->
-            #leaf{
-                deleted = ?i2b(Del),
-                ptr = Ptr,
-                seq = Seq,
-                sizes = upgrade_sizes(Sizes),
-                atts = Atts
-            };
-        (_RevId, ?REV_MISSING) ->
-            ?REV_MISSING
-    end, DiskTree).
 
-disk_tree(RevTree) ->
-    couch_key_tree:map(fun
-        (_RevId, ?REV_MISSING) ->
-            ?REV_MISSING;
-        (_RevId, #leaf{} = Leaf) ->
-            #leaf{
-                deleted = Del,
-                ptr = Ptr,
-                seq = Seq,
-                sizes = Sizes,
-                atts = Atts
-            } = Leaf,
-            {?b2i(Del), Ptr, Seq, split_sizes(Sizes), Atts}
-    end, RevTree).
-
-upgrade_sizes(#size_info{}=SI) ->
-    SI;
-upgrade_sizes({D, E}) ->
-    #size_info{active=D, external=E};
-upgrade_sizes(S) when is_integer(S) ->
-    #size_info{active=S, external=0}.
-
-split_sizes(#size_info{}=SI) ->
-    {SI#size_info.active, SI#size_info.external}.
-
-join_sizes({Active, External}) when is_integer(Active), is_integer(External) ->
-    #size_info{active=Active, external=External}.
-
-btree_by_seq_split(#full_doc_info{}=Info) ->
-    #full_doc_info{
-        id = Id,
-        update_seq = Seq,
-        deleted = Del,
-        sizes = SizeInfo,
-        rev_tree = Tree
-    } = Info,
-    {Seq, {Id, ?b2i(Del), split_sizes(SizeInfo), disk_tree(Tree)}}.
-
-btree_by_seq_join(Seq, {Id, Del, DiskTree}) when is_integer(Del) ->
-    btree_by_seq_join(Seq, {Id, Del, {0, 0}, DiskTree});
-btree_by_seq_join(Seq, {Id, Del, Sizes, DiskTree}) when is_integer(Del) ->
-    #full_doc_info{
-        id = Id,
-        update_seq = Seq,
-        deleted = ?i2b(Del),
-        sizes = join_sizes(Sizes),
-        rev_tree = rev_tree(DiskTree)
-    };
-btree_by_seq_join(KeySeq, {Id, RevInfos, DeletedRevInfos}) ->
-    % Older versions stored #doc_info records in the seq_tree.
-    % Compact to upgrade.
-    #doc_info{
-        id = Id,
-        high_seq=KeySeq,
-        revs =
-            [#rev_info{rev=Rev,seq=Seq,deleted=false,body_sp = Bp} ||
-                {Rev, Seq, Bp} <- RevInfos] ++
-            [#rev_info{rev=Rev,seq=Seq,deleted=true,body_sp = Bp} ||
-                {Rev, Seq, Bp} <- DeletedRevInfos]}.
-
-btree_by_id_split(#full_doc_info{}=Info) ->
-    #full_doc_info{
-        id = Id,
-        update_seq = Seq,
-        deleted = Deleted,
-        sizes = SizeInfo,
-        rev_tree = Tree
-    } = Info,
-    {Id, {Seq, ?b2i(Deleted), split_sizes(SizeInfo), disk_tree(Tree)}}.
-
-% Handle old formats before data_size was added
-btree_by_id_join(Id, {HighSeq, Deleted, DiskTree}) ->
-    btree_by_id_join(Id, {HighSeq, Deleted, #size_info{}, DiskTree});
-
-btree_by_id_join(Id, {HighSeq, Deleted, Sizes, DiskTree}) ->
-    #full_doc_info{
-        id = Id,
-        update_seq = HighSeq,
-        deleted = ?i2b(Deleted),
-        sizes = upgrade_sizes(Sizes),
-        rev_tree = rev_tree(DiskTree)
-    }.
-
-btree_by_id_reduce(reduce, FullDocInfos) ->
-    lists:foldl(
-        fun(Info, {NotDeleted, Deleted, Sizes}) ->
-            Sizes2 = reduce_sizes(Sizes, Info#full_doc_info.sizes),
-            case Info#full_doc_info.deleted of
-            true ->
-                {NotDeleted, Deleted + 1, Sizes2};
-            false ->
-                {NotDeleted + 1, Deleted, Sizes2}
-            end
-        end,
-        {0, 0, #size_info{}}, FullDocInfos);
-btree_by_id_reduce(rereduce, Reds) ->
-    lists:foldl(
-        fun({NotDeleted, Deleted}, {AccNotDeleted, AccDeleted, _AccSizes}) ->
-            % pre 1.2 format, will be upgraded on compaction
-            {AccNotDeleted + NotDeleted, AccDeleted + Deleted, nil};
-        ({NotDeleted, Deleted, Sizes}, {AccNotDeleted, AccDeleted, AccSizes}) ->
-            AccSizes2 = reduce_sizes(AccSizes, Sizes),
-            {AccNotDeleted + NotDeleted, AccDeleted + Deleted, AccSizes2}
-        end,
-        {0, 0, #size_info{}}, Reds).
-
-reduce_sizes(nil, _) ->
-    nil;
-reduce_sizes(_, nil) ->
-    nil;
-reduce_sizes(#size_info{}=S1, #size_info{}=S2) ->
-    #size_info{
-        active = S1#size_info.active + S2#size_info.active,
-        external = S1#size_info.external + S2#size_info.external
-    };
-reduce_sizes(S1, S2) ->
-    reduce_sizes(upgrade_sizes(S1), upgrade_sizes(S2)).
-
-btree_by_seq_reduce(reduce, DocInfos) ->
-    % count the number of documents
-    length(DocInfos);
-btree_by_seq_reduce(rereduce, Reds) ->
-    lists:sum(Reds).
-
-init_db(DbName, Filepath, Fd, Header0, Options) ->
+init_db(DbName, Engine, EngineState, Options) ->
     Header = couch_db_header:upgrade(Header0),
 
-    {ok, FsyncOptions} = couch_util:parse_term(
-            config:get("couchdb", "fsync_options",
-                    "[before_header, after_header, on_file_open]")),
+    DefaultFSync = "[before_header, after_header, on_file_open]"
+    FsyncStr = config:get("couchdb", "fsync_options", DefaultFSync),
+    {ok, FsyncOptions} = couch_util:parse_term(FsyncStr),
 
     case lists:member(on_file_open, FsyncOptions) of
-    true -> ok = couch_file:sync(Fd);
-    _ -> ok
+        true -> ok = couch_file:sync(Fd);
+        _ -> ok
     end,
 
     Compression = couch_compress:get_compression_method(),
@@ -992,6 +822,16 @@ sync_header(Db, NewHeader) ->
         committed_update_seq=Db#db.update_seq,
         waiting_delayed_commit=nil
     }.
+
+
+maybe_track_db(#db{options = Options}) ->
+    case lists:member(sys_db, Options) of
+        true ->
+            ok;
+        false ->
+            couch_stats_process_tracker:track([couchdb, open_databases]);
+    end.
+
 
 copy_doc_attachments(#db{fd = SrcFd} = SrcDb, SrcSp, DestFd) ->
     {ok, {BodyData, BinInfos0}} = couch_db:read_doc(SrcDb, SrcSp),
