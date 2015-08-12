@@ -86,6 +86,14 @@ terminate(_Reason, St) ->
     ok.
 
 
+close(St) ->
+    erlang:demonitor(St#st.fd_monitor, [flush]).
+
+
+delete(St, RootDir) ->
+    delete(RootDir, St#st.filepath).
+
+
 delete(RootDir, FilePath, Async) ->
     %% Delete any leftover compaction files. If we don't do this a
     %% subsequent request for this DB will try to open them to use
@@ -175,6 +183,19 @@ write_summary(St, SummaryBinary) ->
 
 write_doc_infos(St, FullDocInfos, RemoveSeqs, LocalDocs) ->
     ok.
+
+
+start_compaction(St) ->
+    ok.
+
+
+finalize_compaction(St) ->
+    % Assert St#st.filepath ends with .compact.data
+    DestPath = remove_data_suffix(St#st.filepath),
+    ok = file:rename(St#st.filepath, DestPath),
+    couch_file:delete(RootDir, Filepath ++ ".meta"),
+    {ok, St#st{filepath = DestPath}}.
+    
 
 
 id_tree_split(#full_doc_info{}=Info) ->

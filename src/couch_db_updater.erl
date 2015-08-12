@@ -201,69 +201,20 @@ handle_cast(start_compact, Db) ->
             % type to compact to with a new copy compactor.
             couch_log:info("Starting compaction for db \"~s\"", [Db#db.name]),
             {Engine, EngineState} = Db#db.engine,
-            Pid = Engine:start_compactor(EngineState),
-            Db2 = Db#db{compactor_pid=Pid},
+            Pid = Engine:start_compaction(EngineState, self()),
+            Db2 = Db#db{compactor_pid = Pid},
             ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
             {noreply, Db2};
         _ ->
             % compact currently running, this is a no-op
             {noreply, Db}
     end;
-handle_cast({compact_done, NewEngine, CompactFilePath}, #db{} = OldDb) ->
-
-    % We probably want to remove create from the options list
-    % here... Or remove it in ?MODULE:init/1 maybe
-    {ok, NewState1} = NewEngine:init(CompactFilePath, OldDb#db.options),
-    CompactedSeq = NewEngine:get(NewState1, update_seq),
-    {ok, NewState2} = NewEngine:set(NewState1, compacted_seq, CompactedSeq),
-    {ok, NewDb} = init_db(Db#db.name, Engine, NewState2, OldDb#db.options),
-
-    case get_update_seq(Db) == get_update_seq(NewDb) of
-        true ->
-            swap_compaction_files(Db, NewDb)
-            LocalDocs = NewEngine:
-            {ok, NewState1} = Engine: 
-        % suck up all the local docs into memory and write them to the new db
-        {ok, _, LocalDocs} = couch_btree:foldl(Db#db.local_tree,
-                fun(Value, _Offset, Acc) -> {ok, [Value | Acc]} end, []),
-        {ok, NewLocalBtree} = couch_btree:add(NewDb#db.local_tree, LocalDocs),
-
-        NewHeader = couch_db_header:set(NewHeader0, [
-            {compacted_seq, Db#db.update_seq}
-        ]),
-
-        NewDb2 = commit_data(NewDb#db{
-            local_tree = NewLocalBtree,
-            main_pid = self(),
-            filepath = Filepath,
-            instance_start_time = Db#db.instance_start_time,
-            revs_limit = Db#db.revs_limit
-        }),
-
-        couch_log:debug("CouchDB swapping files ~s and ~s.",
-                        [Filepath, CompactFilepath]),
-        ok = file:rename(CompactFilepath, Filepath ++ ".compact"),
-        RootDir = config:get("couchdb", "database_dir", "."),
-        couch_file:delete(RootDir, Filepath),
-        ok = file:rename(Filepath ++ ".compact", Filepath),
-        % Delete the old meta compaction file after promoting
-        % the compaction file.
-        couch_file:delete(RootDir, Filepath ++ ".compact.meta"),
-        close_db(Db),
-        NewDb3 = refresh_validate_doc_funs(NewDb2),
-        ok = gen_server:call(couch_server, {db_updated, NewDb3}, infinity),
-        couch_event:notify(NewDb3#db.name, compacted),
-        couch_log:info("Compaction for db \"~s\" completed.", [Db#db.name]),
-        {noreply, NewDb3#db{compactor_pid=nil}};
-    false ->
-        couch_log:info("Compaction file still behind main file "
-                       "(update seq=~p. compact update seq=~p). Retrying.",
-                       [Db#db.update_seq, NewSeq]),
-        close_db(NewDb),
-        Pid = spawn_link(fun() -> start_copy_compact(Db) end),
-        Db2 = Db#db{compactor_pid=Pid},
-        ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
-        {noreply, Db2}
+handle_cast({compact_done, CompactEngine, CompactFilePath}, #db{} = OldDb) ->
+    case Db#db.engine of
+        {CompactEngine, _} ->
+            finish_engine_compaction(OldDb, CompactFilePath);
+        {_DifferentEngine, _} ->
+            finish_engine_swap(OldDb, CompactEngine, CompactFilePath)
     end;
 
 handle_cast(Msg, #db{name = Name} = Db) ->
@@ -396,13 +347,9 @@ init_db(DbName, Engine, EngineState, Options) ->
         name = DbName,
         engine = {Engine, EngineState},
         committed_update_seq = Engine:get(EngineState, update_seq),
-        update_seq = Engine:get(EngineState, update_seq),
         security = Engine:get(EngineState, security, []),
         instance_start_time = StartTime,
-        revs_limit = Engine:get(EngineState, revs_limit, 1000),
-        fsync_options = FsyncOptions,
         options = Options,
-        compression = couch_compress:get_compression_method(),
         before_doc_update = BDU,
         after_doc_read = ADR
     }.
@@ -761,6 +708,48 @@ get_update_seq(Db) ->
         engine = {Engine, EngineState}
     } = Db,
     Engine:get(EngineState, update_seq).
+
+
+finalize_compaction(OldDb, NewDb) ->
+    #db{
+        engine = {OldEngine, OldEngineState}
+    } = OldDb,
+    #db{
+        engine = {NewEngine, NewEngineState}
+    } = NewDb,
+
+    CompactedSeq = get_update_seq(OldDb),
+
+    {ok, LocalDocs} = OldEngine:read_local_docs(OldEngineState),
+    {ok, NewState1} = NewEngine:write_docs(NewEngineState, [], [], LocalDocs),
+    {ok, NewState2} = NewEngine:set(NewState1, compacted_seq, CompactedSeq),
+    {ok, NewState3} = NewEngine:commit_data(NewState2),
+    {ok, NewState4} = NewEngine:finalize_compaction(NewState3, )
+
+    NewDb#db{
+        main_pid = self(),
+        engine = {NewEngine, NewState4},
+        instance_start_time = OldDb#db.instance_start_time
+    }.
+
+
+close_and_delete(#db{} = Db) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    RootDir = config:get("couchdb", "database_dir", "."),
+    ok = Engine:delete(St, RootDir)
+    Engine:close(St).
+
+
+final_compaction_swap(#db{} = Db) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    {ok, NewState} = Engine:final_compaction_swap(EngineState),
+    Db#db{
+        engine = {Engine, NewState}
+    }.
 
 
 make_doc_summary(#db{compression = Comp}, {Body0, Atts0}) ->
