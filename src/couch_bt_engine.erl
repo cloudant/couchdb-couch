@@ -75,6 +75,7 @@ init(FilePath, Options) ->
     % them lazily
     {ok, Db#db{main_pid = self()}}.
 
+
 terminate(_Reason, St) ->
     % If the reason we died is because our fd disappeared
     % then we don't need to try closing it again.

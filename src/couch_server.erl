@@ -125,6 +125,12 @@ delete(DbName, Options) when is_list(DbName) ->
 delete(DbName, Options) ->
     gen_server:call(couch_server, {delete, DbName, Options}, infinity).
 
+
+clear_compaction_data(DbName) ->
+    % Run Engine:clear_compaction_data(FilePath) for
+    % all configured engines here.
+    ok.
+
 maybe_add_sys_db_callbacks(DbName, Options) when is_binary(DbName) ->
     maybe_add_sys_db_callbacks(?b2l(DbName), Options);
 maybe_add_sys_db_callbacks(DbName, Options) ->
