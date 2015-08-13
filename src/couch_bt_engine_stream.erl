@@ -21,7 +21,7 @@
 ]).
 
 
-foldl({Fd, []}, _Fun, Acc) ->
+foldl({_Fd, []}, _Fun, Acc) ->
     Acc;
 
 foldl({Fd, [{Pos, _} | Rest]}, Fun, Acc) ->

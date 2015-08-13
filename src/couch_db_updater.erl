@@ -14,8 +14,6 @@
 -behaviour(gen_server).
 -vsn(1).
 
--export([btree_by_id_split/1, btree_by_id_join/2, btree_by_id_reduce/2]).
--export([btree_by_seq_split/1, btree_by_seq_join/2, btree_by_seq_reduce/2]).
 -export([make_doc_summary/2]).
 -export([init/1,terminate/2,handle_call/3,handle_cast/2,code_change/3,handle_info/2]).
 
@@ -28,7 +26,7 @@ init({Engine, DbName, FilePath, Options}) ->
     erlang:put(io_priority, {db_update, DbName}),
     try
         Db = case Engine:init(DbName, FilePath, Options) of
-            {ok, EngineState0} ->
+            {ok, EngineState} ->
                 init_db(DbName, Engine, EngineState, Options);
             Error ->
                 throw(Error)
@@ -39,8 +37,8 @@ init({Engine, DbName, FilePath, Options}) ->
         % them lazily
         proc_lib:init_ack({ok, Db#db{main_pid = self()}})
     catch
-        throw:Error ->
-            proc_lib:init_ack(Error)
+        throw:InitError ->
+            proc_lib:init_ack(InitError)
     end.
 
 
@@ -83,7 +81,7 @@ handle_call({set_security, NewSec}, _From, #db{} = Db) ->
     {ok, NewState2} = Engine:increment_update_seq(NewState1),
     {ok, NewState3} = Engine:commit_data(NewState2),
     Db2 = Db#db{
-        engine = {Engine, NewState2},
+        engine = {Engine, NewState3},
         security = NewSec
     },
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
@@ -122,7 +120,7 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
                     NewFDI = FDI#full_doc_info{rev_tree = NewTree},
                     [{NewFDI, RemovedRevs}]
             end;
-        (_, not_found) ->
+        ({_, not_found}) ->
             []
     end, lists:zip(IdRevs, OldDocInfos)),
 
@@ -142,10 +140,10 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
         % the update_seq sequence.
         {NewTree, NewSeqAcc} = couch_key_tree:mapfold(fun
             (_RevId, Leaf, leaf, InnerSeqAcc) ->
-                {Leaf#leaf{seq = InnerSeqAcc + 1}, InnerSeqAcc + 1}
+                {Leaf#leaf{seq = InnerSeqAcc + 1}, InnerSeqAcc + 1};
             (_RevId, Value, _Type, InnerSeqAcc) ->
                 {Value, InnerSeqAcc}
-        end, SeqAcc, Tree),
+        end, SeqAcc, OldTree),
 
         NewFDI = OldFDI#full_doc_info{
             update_seq = NewSeqAcc,
@@ -155,12 +153,12 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
         NewFDIAcc = [NewFDI | FDIAcc],
         NewRemSeqAcc = [RemSeq | RemSeqAcc],
         NewIdRevsAcc = [{Id, RemRevs} | IdRevsAcc],
-        {NewSeqAcc, NewFDIAcc, NewRemSeqacc, NewIdRevsAcc}
-    end, InitAcc, NewDocInfos)
+        {NewSeqAcc, NewFDIAcc, NewRemSeqAcc, NewIdRevsAcc}
+    end, InitAcc, NewDocInfos),
 
     {FinalSeq, FDIs, RemSeqs, PurgedIdRevs} = FinalAcc,
 
-    {ok, NewState1} = Engine:set(EngineState, update_seq, FinalSeq + 1)
+    {ok, NewState1} = Engine:set(EngineState, update_seq, FinalSeq + 1),
     {ok, NewState2} = Engine:update_docs(NewState1, FDIs, RemSeqs),
     {ok, NewState3} = Engine:store_purged(NewState2, PurgedIdRevs),
     {ok, NewState4} = Engine:commit_data(NewState3),
@@ -199,7 +197,7 @@ handle_cast(start_compact, Db) ->
             {noreply, Db}
     end;
 handle_cast({compact_done, CompactEngine, CompactFilePath}, #db{} = OldDb) ->
-    NewDb = case Db#db.engine of
+    NewDb = case OldDb#db.engine of
         {CompactEngine, _} ->
             finish_engine_compaction(OldDb, CompactFilePath);
         {_DifferentEngine, _} ->
@@ -270,9 +268,20 @@ handle_info({'EXIT', _Pid, normal}, Db) ->
     {noreply, Db};
 handle_info({'EXIT', _Pid, Reason}, Db) ->
     {stop, Reason, Db};
-handle_info({'DOWN', Ref, _, _, Reason}, #db{fd_monitor=Ref, name=Name} = Db) ->
-    couch_log:error("DB ~s shutting down - Fd ~p", [Name, Reason]),
-    {stop, normal, Db#db{fd=undefined, fd_monitor=closed}}.
+handle_info(Msg, Db) ->
+    #db{
+        name = Name,
+        engine = {Engine, EngineState}
+    } = Db,
+    case Engine:handle_info(Msg, EngineState) of
+        {noreply, NewState} ->
+            {noreply, Db#db{engine = {Engine, NewState}}};
+        {noreply, NewState, Timeout} ->
+            {noreply, Db#db{engine = {Engine, NewState}}, Timeout};
+        {stop, Reason, NewState} ->
+            couch_log:error("DB ~s shutting down: ~p", [Name, Msg]),
+            {stop, Reason, Db#db{engine = {Engine, NewState}}}
+    end.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -400,7 +409,7 @@ flush_trees(#db{} = Db,
                     end
                 end,
                 ExternalSize = ?term_size(Summary),
-                {ok, NewState, NewSummaryPointer, SummarySize} =
+                {ok, NewSummaryPointer, SummarySize} =
                     Engine:write_summary(EngineState, Summary),
                 Leaf = #leaf{
                     deleted = IsDeleted,
@@ -441,6 +450,15 @@ add_sizes(Type, #leaf{sizes=Sizes, atts=AttSizes}, Acc) ->
     NewESAcc = ESAcc + if Type == leaf -> ExternalSize; true -> 0 end,
     NewAttsAcc = lists:umerge(AttSizes, AttsAcc),
     {NewASAcc, NewESAcc, NewAttsAcc}.
+
+
+upgrade_sizes(#size_info{}=SI) ->
+    SI;
+upgrade_sizes({D, E}) ->
+    #size_info{active=D, external=E};
+upgrade_sizes(S) when is_integer(S) ->
+    #size_info{active=S, external=0}.
+
 
 send_result(Client, Doc, NewResult) ->
     % used to send a result to the client
@@ -568,10 +586,6 @@ merge_rev_tree(OldInfo, NewDoc, _Client, Limit, true) ->
     {NewTree, _} = couch_key_tree:merge(OldTree, NewTree0, Limit),
     OldInfo#full_doc_info{rev_tree = NewTree}.
 
-stem_full_doc_infos(#db{revs_limit=Limit}, DocInfos) ->
-    [Info#full_doc_info{rev_tree=couch_key_tree:stem(Tree, Limit)} ||
-            #full_doc_info{rev_tree=Tree}=Info <- DocInfos].
-
 update_docs_int(Db, DocsList, NonRepDocs, MergeConflicts, FullCommit) ->
     #db{
         engine = {Engine, EngineState}
@@ -584,22 +598,22 @@ update_docs_int(Db, DocsList, NonRepDocs, MergeConflicts, FullCommit) ->
     % lookup up the old documents, if they exist.
     OldDocLookups = Engine:open_docs(EngineState, Ids),
     OldDocInfos = lists:zipwith(fun
-        (_Id, #full_doc_info{} = FDI}) ->
+        (_Id, #full_doc_info{} = FDI) ->
             FDI;
         (Id, not_found) ->
             #full_doc_info{id=Id}
     end, Ids, OldDocLookups),
     % Merge the new docs into the revision trees.
-    {ok, NewFullDocInfos, RemoveSeqs, NewSeq} = merge_rev_trees(RevsLimit,
-            MergeConflicts, DocsList, OldDocInfos, [], [], LastSeq),
+    {ok, NewFullDocInfos, RemSeqs, NewSeq} = merge_rev_trees(RevsLimit,
+            MergeConflicts, DocsList, OldDocInfos, [], [], UpdateSeq),
 
     % Write out the document summaries (the bodies are stored in the nodes of
     % the trees, the attachments are already written to disk)
-    {ok, IndexFDIs} = flush_trees(Db2, NewFullDocInfos, []),
+    {ok, IndexFDIs} = flush_trees(Db, NewFullDocInfos, []),
 
     NewNonRepDocs = update_local_doc_revs(NonRepDocs),
 
-    {ok, NewState1} = Engine:write_doc_info(
+    {ok, NewState1} = Engine:write_doc_infos(
             EngineState, IndexFDIs, RemSeqs, NewNonRepDocs),
     {ok, NewState2} = Engine:set(NewState1, update_seq, NewSeq),
 
@@ -607,13 +621,13 @@ update_docs_int(Db, DocsList, NonRepDocs, MergeConflicts, FullCommit) ->
         engine = {Engine, NewState2}
     },
 
-    WriteCount = length(IndexFullDocInfos),
+    WriteCount = length(IndexFDIs),
     couch_stats:increment_counter([couchdb, document_inserts],
-         WriteCount - length(RemoveSeqs)),
+         WriteCount - length(RemSeqs)),
     couch_stats:increment_counter([couchdb, document_writes], WriteCount),
     couch_stats:increment_counter(
         [couchdb, local_document_writes],
-        length(NonRepDocs)
+        length(NewNonRepDocs)
     ),
 
     % Check if we just updated any design documents, and update the validation
@@ -625,8 +639,8 @@ update_docs_int(Db, DocsList, NonRepDocs, MergeConflicts, FullCommit) ->
 
     Db3 = case length(UpdatedDDocIds) > 0 of
         true ->
-            couch_event:notify(Db3#db.name, ddoc_updated),
-            ddoc_cache:evict(Db3#db.name, UpdatedDDocIds),
+            couch_event:notify(Db2#db.name, ddoc_updated),
+            ddoc_cache:evict(Db2#db.name, UpdatedDDocIds),
             refresh_validate_doc_funs(Db2);
         false ->
             Db2
@@ -678,7 +692,7 @@ commit_data(Db, _) ->
     Db#db{
         engine = {Engine, NewState},
         waiting_delayed_commit = nil,
-        committed_update_seq = Engine:get(NewState, update_seq),
+        committed_update_seq = Engine:get(NewState, update_seq)
     }.
 
 
@@ -687,7 +701,7 @@ maybe_track_db(#db{options = Options}) ->
         true ->
             ok;
         false ->
-            couch_stats_process_tracker:track([couchdb, open_databases]);
+            couch_stats_process_tracker:track([couchdb, open_databases])
     end.
 
 
@@ -698,7 +712,7 @@ get_update_seq(Db) ->
     Engine:get(EngineState, update_seq).
 
 
-finish_engine_compaction(OldDb, CompactFilePath)
+finish_engine_compaction(OldDb, CompactFilePath) ->
     #db{
         engine = {Engine, OldState}
     } = OldDb,
@@ -710,8 +724,8 @@ finish_engine_compaction(OldDb, CompactFilePath)
             {ok, NewState2} = Engine:finish_compaction(OldState, NewState1),
             NewDb1 = OldDb#db{
                 engine = {Engine, NewState2},
-                compaction_pid = nil
-            }
+                compactor_pid = nil
+            },
             NewDb2 = refresh_validate_doc_funs(NewDb1),
             ok = gen_server:call(couch_server, {db_updated, NewDb2}, infinity),
             couch_event:notify(NewDb2#db.name, compacted),
@@ -721,7 +735,7 @@ finish_engine_compaction(OldDb, CompactFilePath)
         false ->
             ok = Engine:close(NewState1),
             NewDb = OldDb#db{
-                compaction_pid = Engine:start_compaction(
+                compactor_pid = Engine:start_compaction(
                         OldState, OldDb#db.name, OldDb#db.options, self())
             },
             couch_log:info("Compaction file still behind main file "

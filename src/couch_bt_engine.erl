@@ -75,6 +75,10 @@ terminate(_Reason, St) ->
     ok.
 
 
+handle_info({'DOWN', Ref, _, _, Reason}, #st{fd_monitor=Ref} = St) ->
+    {stop, normal, St#st{fd=undefined, fd_monitor=closed}}.
+
+
 close(St) ->
     erlang:demonitor(St#st.fd_monitor, [flush]).
 
@@ -166,6 +170,10 @@ open_docs(#st{} = St, DocIds) ->
 
 
 open_local_docs(#st{} = St, DocIds) ->
+    % Need to convert the old style local doc
+    % to a #doc{} record like used to happen
+    % in open_doc_int
+    erlang:error(vomit),
     Results = couch_btree:lookup(St#st.local_tree, DocIds),
     lists:map(fun
         ({ok, Doc}) -> Doc;
@@ -582,14 +590,6 @@ disk_tree(RevTree) ->
             } = Leaf,
             {?b2i(Del), Ptr, Seq, split_sizes(Sizes), Atts}
     end, RevTree).
-
-
-upgrade_sizes(#size_info{}=SI) ->
-    SI;
-upgrade_sizes({D, E}) ->
-    #size_info{active=D, external=E};
-upgrade_sizes(S) when is_integer(S) ->
-    #size_info{active=S, external=0}.
 
 
 split_sizes(#size_info{}=SI) ->
