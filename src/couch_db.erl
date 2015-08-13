@@ -480,9 +480,6 @@ set_revs_limit(_Db, _Limit) ->
 name(#db{name=Name}) ->
     Name.
 
-compression(#db{compression=Compression}) ->
-    Compression.
-
 update_doc(Db, Doc, Options) ->
     update_doc(Db, Doc, Options, interactive_edit).
 
