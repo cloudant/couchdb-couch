@@ -858,7 +858,7 @@ update_docs(Db, Docs0, Options, replicated_changes) ->
         DocErrors = [],
         DocBuckets3 = DocBuckets
     end,
-    DocBuckets4 = [[doc_flush_atts(check_dup_atts(Doc), Db#db.fd)
+    DocBuckets4 = [[doc_flush_atts(Db, check_dup_atts(Doc))
             || Doc <- Bucket] || Bucket <- DocBuckets3],
     {ok, []} = write_and_commit(Db, DocBuckets4, [], [merge_conflicts | Options]),
     {ok, DocErrors};
@@ -912,8 +912,8 @@ update_docs(Db, Docs0, Options, interactive_edit) ->
         Options2 = if AllOrNothing -> [merge_conflicts];
                 true -> [] end ++ Options,
         DocBuckets3 = [[
-                doc_flush_atts(set_new_att_revpos(
-                        check_dup_atts(Doc)), Db#db.fd)
+                doc_flush_atts(Db, set_new_att_revpos(
+                        check_dup_atts(Doc)))
                 || Doc <- B] || B <- DocBuckets2],
         {DocBuckets4, IdRevs} = new_revs(DocBuckets3, [], []),
 
@@ -997,7 +997,7 @@ write_and_commit(#db{main_pid=Pid, user_ctx=Ctx}=Db, DocBuckets1,
             % compaction. Retry by reopening the db and writing to the current file
             {ok, Db2} = open(Db#db.name, [{user_ctx, Ctx}]),
             DocBuckets2 = [
-                [doc_flush_atts(Doc, Db2#db.fd) || Doc <- Bucket] ||
+                [doc_flush_atts(Db2, Doc) || Doc <- Bucket] ||
                 Bucket <- DocBuckets1
             ],
             % We only retry once
@@ -1019,15 +1019,15 @@ prepare_doc_summaries(Db, BucketList) ->
         fun(#doc{body = Body, atts = Atts} = Doc) ->
             DiskAtts = [couch_att:to_disk_term(Att) || Att <- Atts],
             {ok, SizeInfo} = couch_att:size_info(Atts),
-            AttsFd = case Atts of
+            AttsStream = case Atts of
             [Att | _] ->
-                {Fd, _} = couch_att:fetch(data, Att),
-                Fd;
+                {stream, StreamEngine} = couch_att:fetch(data, Att),
+                StreamEngine;
             [] ->
                 nil
             end,
             SummaryChunk = couch_db_updater:make_doc_summary(Db, {Body, DiskAtts}),
-            Doc#doc{body = {summary, SummaryChunk, SizeInfo, AttsFd}}
+            Doc#doc{body = {summary, SummaryChunk, SizeInfo, AttsStream}}
         end,
         Bucket) || Bucket <- BucketList].
 
@@ -1052,8 +1052,8 @@ set_new_att_revpos(#doc{revs={RevPos,_Revs},atts=Atts0}=Doc) ->
     Doc#doc{atts = Atts}.
 
 
-doc_flush_atts(Doc, Fd) ->
-    Doc#doc{atts=[couch_att:flush(Fd, Att) || Att <- Doc#doc.atts]}.
+doc_flush_atts(Db, Doc) ->
+    Doc#doc{atts=[couch_att:flush(Db, Att) || Att <- Doc#doc.atts]}.
 
 check_md5(_NewSig, <<>>) -> ok;
 check_md5(Sig, Sig) -> ok;
@@ -1087,21 +1087,24 @@ compressible_att_type(MimeType) ->
 % is present in the request, but there is no Content-MD5
 % trailer, we're free to ignore this inconsistency and
 % pretend that no Content-MD5 exists.
-with_stream(Fd, Att, Fun) ->
+with_stream(Db, Att, Fun) ->
     [InMd5, Type, Enc] = couch_att:fetch([md5, type, encoding], Att),
     BufferSize = list_to_integer(
         config:get("couchdb", "attachment_stream_buffer_size", "4096")),
-    {ok, OutputStream} = case (Enc =:= identity) andalso
-        compressible_att_type(Type) of
-    true ->
-        CompLevel = list_to_integer(
-            config:get("attachments", "compression_level", "0")
-        ),
-        couch_stream:open(Fd, [{buffer_size, BufferSize},
-            {encoding, gzip}, {compression_level, CompLevel}]);
-    _ ->
-        couch_stream:open(Fd, [{buffer_size, BufferSize}])
+    Options = case (Enc =:= identity) andalso compressible_att_type(Type) of
+        true ->
+            CompLevel = list_to_integer(
+                config:get("attachments", "compression_level", "0")
+            ),
+            [
+                {buffer_size, BufferSize},
+                {encoding, gzip},
+                {compression_level, CompLevel}
+            ];
+        _ ->
+            [{buffer_size, BufferSize}]
     end,
+    {ok, OutputStream} = open_write_stream(Db, Options),
     ReqMd5 = case Fun(OutputStream) of
         {md5, FooterMd5} ->
             case InMd5 of
@@ -1111,7 +1114,7 @@ with_stream(Fd, Att, Fun) ->
         _ ->
             InMd5
     end,
-    {StreamInfo, Len, IdentityLen, Md5, IdentityMd5} =
+    {StreamEngine, Len, IdentityLen, Md5, IdentityMd5} =
         couch_stream:close(OutputStream),
     check_md5(IdentityMd5, ReqMd5),
     {AttLen, DiskLen, NewEnc} = case Enc of
@@ -1135,12 +1138,33 @@ with_stream(Fd, Att, Fun) ->
         end
     end,
     couch_att:store([
-        {data, {Fd,StreamInfo}},
+        {data, {stream, StreamEngine}},
         {att_len, AttLen},
         {disk_len, DiskLen},
         {md5, Md5},
         {encoding, NewEnc}
     ], Att).
+
+
+open_write_stream(Db, Options) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:open_write_stream(EngineState, Options),
+
+
+open_read_stream(Db, AttState) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:open_read_stream(EngineState, AttState).
+
+
+is_active_stream(Db, StreamEngine) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:is_active_stream(EngineState, StreamEngine).
 
 
 enum_docs_since_reduce_to_count(Reds) ->

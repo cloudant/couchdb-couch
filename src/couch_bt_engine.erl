@@ -195,6 +195,21 @@ get_design_docs(St) ->
     {ok, lists:reverse(Docs)}.
     
 
+make_summary(#st{} = St, {Body0, Atts0}) ->
+    Comp = St#st.compression,
+    Body = case couch_compress:is_compressed(Body0, Comp) of
+        true -> Body0;
+        % pre 1.2 database file format
+        false -> couch_compress:compress(Body0, Comp)
+    end,
+    Atts = case couch_compress:is_compressed(Atts0, Comp) of
+        true -> Atts0;
+        false -> couch_compress:compress(Atts0, Comp)
+    end,
+    SummaryBin = ?term_to_bin({Body, Atts}),
+    couch_file:assemble_file_chunk(SummaryBin, couch_util:md5(SummaryBin)).
+
+
 write_summary(St, SummaryBinary) ->
     #st{
         fd = Fd
@@ -204,6 +219,20 @@ write_summary(St, SummaryBinary) ->
 
 write_doc_infos(#st{} = St, FullDocInfos, RemoveSeqs, LocalDocs) ->
     ok.
+
+
+open_write_stream(#st{} = St, Options) ->
+    couch_stream:open({couch_bt_engine_stream, {St#st.fd, []}}, Options).
+
+
+open_read_steram(#st{} = St, StreamSt) ->
+    {couch_bt_engine_stream, {St#st.fd, StreamSt}}.
+
+
+is_active_stream(#st{} = St, {couch_bt_engine_stream, Fd, _}) ->
+    St#st.fd == Fd;
+is_active_stream(_, _) ->
+    false.
 
 
 get_last_purged(#st{} = St) ->

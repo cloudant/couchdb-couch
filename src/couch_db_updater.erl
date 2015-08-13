@@ -394,7 +394,7 @@ flush_trees(#db{} = Db,
                 % and convert bins, removing the FD.
                 % All bins should have been written to disk already.
                 if AttsStream == nil -> ok; true ->
-                    case Engine:is_current_stream(EngineState, AttsStream) of
+                    case couch_db:is_active_stream(Db, AttsStream) of
                         true ->
                             ok;
                         false ->
@@ -744,19 +744,8 @@ finish_engine_swap(OldDb, NewEngine, CompactFilePath) ->
     erlang:error(explode).
 
 
-make_doc_summary(#db{compression = Comp}, {Body0, Atts0}) ->
-    Body = case couch_compress:is_compressed(Body0, Comp) of
-    true ->
-        Body0;
-    false ->
-        % pre 1.2 database file format
-        couch_compress:compress(Body0, Comp)
-    end,
-    Atts = case couch_compress:is_compressed(Atts0, Comp) of
-    true ->
-        Atts0;
-    false ->
-        couch_compress:compress(Atts0, Comp)
-    end,
-    SummaryBin = ?term_to_bin({Body, Atts}),
-    couch_file:assemble_file_chunk(SummaryBin, couch_crypto:hash(md5, SummaryBin)).
+make_doc_summary(Db, DocParts) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:make_doc_summary(EngineState, DocParts).
