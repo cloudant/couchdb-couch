@@ -14,21 +14,39 @@
 -behaviour(gen_server).
 -vsn(1).
 
-% public API
--export([open/1, open/2, close/1]).
--export([foldl/4, foldl/5, foldl_decode/6, range_foldl/6]).
--export([copy_to_new_stream/3, write/2]).
--export([to_disk_term/1]).
 
-% gen_server callbacks
--export([init/1, terminate/2, code_change/3]).
--export([handle_cast/2, handle_call/3, handle_info/2]).
+-export([
+    open/1,
+    open/2,
+    close/1,
+
+    copy/2,
+    write/2,
+    to_disk_term/1,
+
+    foldl/3,
+    foldl/4,
+    foldl_decode/5,
+    range_foldl/5
+]).
+
+-export([
+    init/1,
+    terminate/2,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    code_change/3
+]).
+
 
 -include_lib("couch/include/couch_db.hrl").
 
+
 -define(DEFAULT_BUFFER_SIZE, 4096).
 
--record(st, {
+
+-record(stream, {
     engine,
     opener_monitor,
     written_pointers=[],
@@ -49,16 +67,25 @@
 open({_StreamEngine, _StreamEngineState} = Engine) ->
     open(Engine, []).
 
+
 open({_StreamEngine, _StreamEngineState} = Engine, Options) ->
     gen_server:start_link(?MODULE, {Engine, self(), erlang:get(io_priority), Options}, []).
 
+
 close(Pid) ->
     gen_server:call(Pid, close, infinity).
+
 
 copy(Src, Dst) ->
     foldl(Src, fun(Bin, _) ->
         ok = write(Dst, Bin)
     end, ok).
+
+
+write(_Pid, <<>>) ->
+    ok;
+write(Pid, Bin) ->
+    gen_server:call(Pid, {write, Bin}, infinity).
 
 
 to_disk_term({Engine, EngineState}) ->
@@ -93,7 +120,7 @@ range_foldl(Engine, From, To, UserFun, UserAcc) when To >= From ->
     NewEngine = do_seek(Engine, From),
     InitAcc = {To - From, UserFun, UserAcc},
     try
-        {_, _, UserAcc2} = foldl(Engine, fun foldl_length/2, InitAcc),
+        {_, _, UserAcc2} = foldl(NewEngine, fun foldl_length/2, InitAcc),
         UserAcc2
     catch
         throw:{finished, UserAcc3} ->
@@ -107,7 +134,7 @@ foldl_md5(Bin, {Md5Acc, UserFun, UserAcc}) ->
 
 
 foldl_decode(EncBin, {DecFun, UserFun, UserAcc}) ->
-    case DecFun(Bin) of
+    case DecFun(EncBin) of
         <<>> -> {DecFun, UserFun, UserAcc};
         Dec -> {DecFun, UserFun, UserFun(Dec, UserAcc)}
     end.
@@ -120,7 +147,7 @@ foldl_length(Bin, {Length, UserFun, UserAcc}) ->
             {Length - BinSize, UserFun, UserFun(Bin, UserAcc)};
         false ->
             <<Trunc:BinSize/binary, _/binary>> = Bin,
-            throw({finished, UserFun(TruncBin, UserAcc)})
+            throw({finished, UserFun(Trunc, UserAcc)})
     end.
 
 gzip_init(Options) ->
@@ -163,11 +190,6 @@ identity_enc_dec_funs() ->
         fun(Data) -> Data end,
         fun() -> [] end
     }.
-
-write(_Pid, <<>>) ->
-    ok;
-write(Pid, Bin) ->
-    gen_server:call(Pid, {write, Bin}, infinity).
 
 
 init({Fd, OpenerPid, OpenerPriority, Options}) ->
@@ -256,7 +278,6 @@ handle_call(close, _From, Stream) ->
         {do_finalize(Engine), WrittenLen, IdenLen, Md5Final, IdenMd5Final};
     _ ->
         {ok, NewEngine} = do_write(Engine, WriteBin2),
-        StreamInfo = lists:reverse(Written, [{Pos, iolist_size(WriteBin2)}]),
         StreamLen = WrittenLen + iolist_size(WriteBin2),
         {do_finalize(NewEngine), StreamLen, IdenLen, Md5Final, IdenMd5Final}
     end,
