@@ -2,10 +2,11 @@
 
 
 -export([
-    start/1
+    start/4
 ]).
 
 
+-include_lib("couch/include/couch_db.hrl").
 -include("couch_bt_engine.hrl").
 
 
@@ -27,13 +28,12 @@ start(#st{} = St, DbName, Options, Parent) ->
     erlang:put(io_priority, {db_compact, DbName}),
     #st{
         filepath = FilePath,
-        header = Header,
-        options = Options
+        header = Header
     } = St,
-    couch_log:debug("Compaction process spawned for db \"~s\"", [Name]),
+    couch_log:debug("Compaction process spawned for db \"~s\"", [DbName]),
 
     {ok, NewSt, DName, DFd, MFd, Retry} =
-            open_compaction_files(Name, Header, FilePath, Options),
+            open_compaction_files(Header, FilePath, Options),
     erlang:monitor(process, MFd),
 
     % This is a bit worrisome. init_db/4 will monitor the data fd
@@ -47,9 +47,7 @@ start(#st{} = St, DbName, Options, Parent) ->
     NewSt3 = sort_meta_data(NewSt2),
     NewSt4 = commit_compaction_data(NewSt3),
     NewSt5 = copy_meta_data(NewSt4),
-
-    % Fixme
-    NewSt6 = sync_header(NewSt5, db_to_header(NewDb5, NewDb5#db.header)),
+    NewSt6 = couch_bt_engine:commit_data(NewSt5),
     ok = couch_bt_engine:close(NewSt6),
     ok = couch_file:close(MFd),
 
@@ -57,7 +55,7 @@ start(#st{} = St, DbName, Options, Parent) ->
     gen_server:cast(Parent, {compact_done, couch_bt_engine, DName}).
 
 
-open_compaction_files(DbName, SrcHdr, DbFilePath, Options) ->
+open_compaction_files(SrcHdr, DbFilePath, Options) ->
     DataFile = DbFilePath ++ ".compact.data",
     MetaFile = DbFilePath ++ ".compact.meta",
     {ok, DataFd, DataHdr} = open_compaction_file(DataFile),
@@ -69,14 +67,14 @@ open_compaction_files(DbName, SrcHdr, DbFilePath, Options) ->
             St0 = couch_bt_engine:init_state(
                     DataFile, DataFd, DbHeader, Options),
             St1 = bind_emsort(St0, MetaFd, A#comp_header.meta_state),
-            {ok, St1, DataFile, DataFd, MetaFd, St0#db.id_tree};
+            {ok, St1, DataFile, DataFd, MetaFd, St0#st.id_tree};
         _ when DataHdrIsDbHdr ->
             Header = couch_bt_engine_header:from(SrcHdr),
             ok = reset_compaction_file(MetaFd, Header),
             St0 = couch_bt_engine:init_state(
                     DataFile, DataFd, DataHdr, Options),
             St1 = bind_emsort(St0, MetaFd, nil),
-            {ok, St1, DataFile, DataFd, MetaFd, St0#db.id_tree};
+            {ok, St1, DataFile, DataFd, MetaFd, St0#st.id_tree};
         _ ->
             Header = couch_db_header:from(SrcHdr),
             ok = reset_compaction_file(DataFd, Header),
@@ -102,15 +100,15 @@ copy_purge_info(OldSt, NewSt) ->
             ]),
             NewSt#st{header = NewNewHdr};
         false ->
-            NewDb
+            NewSt
     end.
 
 
 copy_compact(DbName, St, NewSt0, Retry) ->
     Compression = couch_compress:get_compression_method(),
-    NewSt = NewSt0#db{compression = Compression},
+    NewSt = NewSt0#st{compression = Compression},
     NewUpdateSeq = couch_bt_engine:get(NewSt0, update_seq),
-    TotalChanges = couch_bt_engine:count_changes_since(Db, NewUpdateSeq),
+    TotalChanges = couch_bt_engine:count_changes_since(St, NewUpdateSeq),
     BufferSize = list_to_integer(
         config:get("database_compaction", "doc_buffer_size", "524288")),
     CheckpointAfter = couch_util:to_integer(
@@ -173,21 +171,21 @@ copy_compact(DbName, St, NewSt0, Retry) ->
     NewSt3 = copy_docs(St, NewSt2, lists:reverse(Uncopied), Retry),
 
     % Copy the security information over
-    NewSt4 = case couch_bt_engine:get_security(OldSt) of
+    NewSt4 = case couch_bt_engine:get_security(St) of
         {ok, []} ->
             couch_bt_engine:set(NewSt3, security_ptr, nil);
         {ok, SecProps} ->
             {ok, Ptr, _} = couch_file:append_term(
-                NewSt3.fd, SecProps, [{compression, NewSt3#st.compression}]),
+                NewSt3#st.fd, SecProps, [{compression, NewSt3#st.compression}]),
             couch_bt_engine:set(NewSt3, security_ptr, Ptr)
     end,
 
-    FinalUpdateSeq = couch_bt_engine:get(St, update_seq)
+    FinalUpdateSeq = couch_bt_engine:get(St, update_seq),
     NewSt5 = couch_bt_engine:set(NewSt4, update_seq, FinalUpdateSeq),
     commit_compaction_data(NewSt5).
 
 
-copy_docs(St, #st{fd = DestFd} = NewSt, MixedInfos, Retry) ->
+copy_docs(St, #st{} = NewSt, MixedInfos, Retry) ->
     DocInfoIds = [Id || #doc_info{id=Id} <- MixedInfos],
     LookupResults = couch_btree:lookup(St#st.id_tree, DocInfoIds),
     % COUCHDB-968, make sure we prune duplicates during compaction
@@ -198,12 +196,12 @@ copy_docs(St, #st{fd = DestFd} = NewSt, MixedInfos, Retry) ->
     NewInfos1 = lists:map(fun(Info) ->
         {NewRevTree, FinalAcc} = couch_key_tree:mapfold(fun
             (_Rev, #leaf{ptr=Sp}=Leaf, leaf, SizesAcc) ->
-                {Body, AttInfos} = copy_doc_attachments(Db, Sp, DestFd),
+                {Body, AttInfos} = copy_doc_attachments(St, Sp, NewSt),
                 SummaryChunk = couch_bt_engine:make_doc_summary(
                         NewSt, {Body, AttInfos}),
                 ExternalSize = ?term_size(SummaryChunk),
                 {ok, Pos, SummarySize} = couch_file:append_raw_chunk(
-                    DestFd, SummaryChunk),
+                    NewSt#st.fd, SummaryChunk),
                 AttSizes = [{element(3,A), element(4,A)} || A <- AttInfos],
                 NewLeaf = Leaf#leaf{
                     ptr = Pos,
@@ -230,12 +228,12 @@ copy_docs(St, #st{fd = DestFd} = NewSt, MixedInfos, Retry) ->
         }
     end, NewInfos0),
 
-    RevsLimit = couch_bt_engine:get(St, revs_limit),
+    Limit = couch_bt_engine:get(St, revs_limit),
     NewInfos = lists:map(fun(FDI) ->
         FDI#full_doc_info{
-            rev_tree = couch_key_tree:stem(FDI#full_doc_info.rev_tree, Limit)}
+            rev_tree = couch_key_tree:stem(FDI#full_doc_info.rev_tree, Limit)
         }
-    end, NewInfos1)
+    end, NewInfos1),
 
     RemoveSeqs =
     case Retry of
@@ -262,7 +260,7 @@ copy_docs(St, #st{fd = DestFd} = NewSt, MixedInfos, Retry) ->
     NewSt#st{id_tree=IdEms, seq_tree=SeqTree}.
 
 
-copy_doc_attachments(#st{} = SrcSt, SrcSp, DestFd) ->
+copy_doc_attachments(#st{} = SrcSt, SrcSp, DstSt) ->
     {ok, {BodyData, BinInfos0}} = couch_bt_engine:read_doc(SrcSt, SrcSp),
     BinInfos = case BinInfos0 of
     _ when is_binary(BinInfos0) ->
@@ -307,7 +305,7 @@ copy_doc_attachments(#st{} = SrcSt, SrcSp, DestFd) ->
 
 
 sort_meta_data(St0) ->
-    {ok, Ems} = couch_emsort:merge(St0#db.id_tree),
+    {ok, Ems} = couch_emsort:merge(St0#st.id_tree),
     St0#st{id_tree=Ems}.
 
 
@@ -326,7 +324,7 @@ copy_meta_data(#st{} = St) ->
     {ok, Iter} = couch_emsort:iter(Src),
     Acc0 = #merge_st{
         id_tree=IdTree0,
-        seq_tree=Db#db.seq_tree,
+        seq_tree=St#st.seq_tree,
         rem_seqs=[],
         infos=[]
     },

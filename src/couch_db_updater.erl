@@ -43,6 +43,7 @@ init({Engine, DbName, FilePath, Options}) ->
 
 
 terminate(Reason, Db) ->
+    couch_util:shutdown_sync(Db#db.compactor_pid),
     {Engine, EngineState} = Db#db.engine,
     Engine:terminate(Reason, EngineState),
     ok.

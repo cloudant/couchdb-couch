@@ -4,9 +4,40 @@
 -export([
     exists/1,
     init/2,
+    terminate/2,
+    handle_info/2,
+
+    close/1,
+
+    delete/2,
     delete/3,
 
     sync/1,
+
+    increment_update_seq/1,
+    store_security/2,
+
+    open_docs/2,
+    open_local_docs/2,
+    read_doc/2,
+    get_design_docs/1,
+
+    make_summary/2,
+    write_summary/2,
+    write_doc_infos/4,
+
+    open_write_stream/2,
+    open_read_stream/2,
+    is_active_stream/2,
+
+    get_security/1,
+    get_last_purged/1,
+    get_doc_count/1,
+    get_del_doc_count/1,
+    get_size_info/1,
+
+    start_compaction/3,
+    finish_compaction/2,
 
     get/2,
     get/3,
@@ -26,6 +57,7 @@
 ]).
 
 
+-include_lib("couch/include/couch_db.hrl").
 -include("couch_bt_engine.hrl").
 
 
@@ -51,31 +83,26 @@ init(FilePath, Options) ->
                 {ok, Header0} ->
                     Header0;
                 no_valid_header ->
-                    delete_compaction_Files(FilePath),
+                    delete_compaction_files(FilePath),
                     Header0 =  couch_db_header:new(),
                     ok = couch_file:write_header(Fd, Header0),
                     Header0
             end
     end,
-    State = init_state(FilePath, Fd, Header, Options),
-
-    % we don't load validation funs here because the fabric query is liable to
-    % race conditions.  Instead see couch_db:validate_doc_update, which loads
-    % them lazily
-    {ok, Db#db{main_pid = self()}}.
+    {ok, init_state(FilePath, Fd, Header, Options)}.
 
 
 terminate(_Reason, St) ->
     % If the reason we died is because our fd disappeared
     % then we don't need to try closing it again.
     if St#st.fd_monitor == closed -> ok; true ->
-        ok = couch_file:close(Db#db.fd)
+        ok = couch_file:close(St#st.fd)
     end,
-    couch_util:shutdown_sync(Fd),
+    couch_util:shutdown_sync(St#st.fd),
     ok.
 
 
-handle_info({'DOWN', Ref, _, _, Reason}, #st{fd_monitor=Ref} = St) ->
+handle_info({'DOWN', Ref, _, _, _}, #st{fd_monitor=Ref} = St) ->
     {stop, normal, St#st{fd=undefined, fd_monitor=closed}}.
 
 
@@ -92,7 +119,7 @@ delete(RootDir, FilePath, Async) ->
     %% subsequent request for this DB will try to open them to use
     %% as a recovery.
     lists:foreach(fun(Ext) ->
-        couch_file:delete(Server#server.root_dir, FullFilepath ++ Ext)
+        couch_file:delete(RootDir, FilePath ++ Ext)
     end, [".compact", ".compact.data", ".compact.meta"]),
 
     % Delete the actual database file
@@ -106,7 +133,6 @@ sync(#st{fd = Fd}) ->
 commit_data(St) ->
     #st{
         fd = Fd,
-        filepath = FilePath,
         fsync_options = FsyncOptions,
         header = OldHeader,
         needs_commit = NeedsCommit
@@ -191,7 +217,7 @@ get_design_docs(St) ->
             {ok, Acc};
         (#full_doc_info{id = Id} = FDI, _Reds, Acc) ->
             case Id of
-                <<?DESIGN_DOC_PREFIX/binary, _/binary>> ->
+                <<?DESIGN_DOC_PREFIX, _/binary>> ->
                     {ok, [FDI | Acc]};
                 _ ->
                     {stop, Acc}
@@ -200,7 +226,7 @@ get_design_docs(St) ->
     KeyOpts = [{start_key, <<"_design/">>}, {end_key_gt, <<"_design0">>}],
     {ok, _, Docs} = couch_btree:fold(St#st.id_tree, FoldFun, [], KeyOpts),
     {ok, lists:reverse(Docs)}.
-    
+
 
 make_summary(#st{} = St, {Body0, Atts0}) ->
     Comp = St#st.compression,
@@ -231,7 +257,7 @@ write_doc_infos(#st{} = St, FullDocInfos, RemoveSeqs, LocalDocs) ->
         local_tree = LocalTree
     } = St,
     {ok, IdTree2} = couch_btree:add_remove(IdTree, FullDocInfos, []),
-    {ok, SeqBTree2} = couch_btree:add_remove(SeqTree, FullDocInfos, RemoveSeqs),
+    {ok, SeqTree2} = couch_btree:add_remove(SeqTree, FullDocInfos, RemoveSeqs),
     {ok, LocalTree2} = couch_btree:add_remove(LocalTree, LocalDocs, []),
     St#st{
         id_tree = IdTree2,
@@ -244,7 +270,7 @@ open_write_stream(#st{} = St, Options) ->
     couch_stream:open({couch_bt_engine_stream, {St#st.fd, []}}, Options).
 
 
-open_read_steram(#st{} = St, StreamSt) ->
+open_read_stream(#st{} = St, StreamSt) ->
     {couch_bt_engine_stream, {St#st.fd, StreamSt}}.
 
 
@@ -294,7 +320,7 @@ get_size_info(#st{} = St) ->
         AS ->
             #size_info{active=AS}
     end,
-    ActiveSize = active_size(Db, SizeInfo),
+    ActiveSize = active_size(St, SizeInfo),
     ExternalSize = SizeInfo#size_info.external,
     [
         {active, ActiveSize},
@@ -326,13 +352,13 @@ finish_compaction(#st{} = OldSt, #st{} = NewSt1) ->
 
     NewSt2 = ?MODULE:set(NewSt1, compact_seq, ?MODULE:get(OldSt, update_seq)),
     NewSt3 = commit_data(NewSt2#st{
-        local_tree = NewLocal2,
+        local_tree = NewLocal2
     }),
 
     % Rename our *.compact.data file to *.compact so that if we
     % die between deleting the old file and renaming *.compact
     % we can recover correctly.
-    ok = file:rename(CompactDataPath, Filepath ++ ".compact"),
+    ok = file:rename(CompactDataPath, FilePath ++ ".compact"),
 
     % Remove the uncompacted database file
     RootDir = config:get("couchdb", "database_dir", "."),
@@ -351,7 +377,7 @@ finish_compaction(#st{} = OldSt, #st{} = NewSt1) ->
     % And return our finished new state
     NewSt3#st{
         filepath = FilePath
-    }.    
+    }.
 
 
 id_tree_split(#full_doc_info{}=Info) ->
@@ -374,7 +400,7 @@ id_tree_join(Id, {HighSeq, Deleted, Sizes, DiskTree}) ->
         id = Id,
         update_seq = HighSeq,
         deleted = ?i2b(Deleted),
-        sizes = upgrade_sizes(Sizes),
+        sizes = couch_db_updater:upgrade_sizes(Sizes),
         rev_tree = rev_tree(DiskTree)
     }.
 
@@ -430,7 +456,7 @@ seq_tree_join(KeySeq, {Id, RevInfos, DeletedRevInfos}) ->
         #rev_info{rev = Rev, seq = Seq, deleted = false, body_sp = Bp}
     end, RevInfos),
     DeletedRevs = lists:map(fun({Rev, Seq, Bp}) ->
-        #rev_info{rev = Rev, Seq = Seq, deleted = true, body_sp = Bp}
+        #rev_info{rev = Rev, seq = Seq, deleted = true, body_sp = Bp}
     end, DeletedRevInfos),
     #doc_info{
         id = Id,
@@ -453,11 +479,11 @@ open_db_file(FilePath, Options) ->
         {error, enoent} ->
             % Couldn't find file. is there a compact version? This ca
             % happen (rarely) if we crashed during the file switch.
-            case couch_file:open(Filepath ++ ".compact", [nologifmissing]) of
+            case couch_file:open(FilePath ++ ".compact", [nologifmissing]) of
                 {ok, Fd} ->
                     Fmt = "Recovering from compaction file: ~s~s",
-                    couch_log:info(Fmt, [Filepath, ".compact"]),
-                    ok = file:rename(Filepath ++ ".compact", Filepath),
+                    couch_log:info(Fmt, [FilePath, ".compact"]),
+                    ok = file:rename(FilePath ++ ".compact", FilePath),
                     ok = couch_file:sync(Fd),
                     {ok, Fd};
                 {error, enoent} ->
@@ -469,12 +495,12 @@ open_db_file(FilePath, Options) ->
 
 
 init_state(FilePath, Fd, Header0, Options) ->
-    DefaultFSync = "[before_header, after_header, on_file_open]"
+    DefaultFSync = "[before_header, after_header, on_file_open]",
     FsyncStr = config:get("couchdb", "fsync_options", DefaultFSync),
     {ok, FsyncOptions} = couch_util:parse_term(FsyncStr),
 
     case lists:member(on_file_open, FsyncOptions) of
-        true -> ok = Engine:sync(EngineState);
+        true -> ok = couch_file:sync(Fd);
         _ -> ok
     end,
 
@@ -482,7 +508,7 @@ init_state(FilePath, Fd, Header0, Options) ->
     Compression = couch_compress:get_compression_method(),
 
     IdTreeState = couch_db_header:id_tree_state(Header),
-    {ok, IdBTree} = couch_btree:open(IdTreeState, Fd, [
+    {ok, IdTree} = couch_btree:open(IdTreeState, Fd, [
             {split, fun ?MODULE:btree_by_id_split/1},
             {join, fun ?MODULE:btree_by_id_join/2},
             {reduce, fun ?MODULE:btree_by_id_reduce/2},
@@ -490,7 +516,7 @@ init_state(FilePath, Fd, Header0, Options) ->
         ]),
 
     SeqTreeState = couch_db_header:seq_tree_state(Header),
-    {ok, SeqBTree} = couch_btree:open(SeqTreeState, Fd, [
+    {ok, SeqTree} = couch_btree:open(SeqTreeState, Fd, [
             {split, fun ?MODULE:btree_by_seq_split/1},
             {join, fun ?MODULE:btree_by_seq_join/2},
             {reduce, fun ?MODULE:btree_by_seq_reduce/2},
@@ -498,7 +524,7 @@ init_state(FilePath, Fd, Header0, Options) ->
         ]),
 
     LocalTreeState = couch_db_header:local_tree_state(Header),
-    {ok, LocalBTree} = couch_btree:open(LocalTreeState, Fd, [
+    {ok, LocalTree} = couch_btree:open(LocalTreeState, Fd, [
             {compression, Compression}
         ]),
 
@@ -511,9 +537,10 @@ init_state(FilePath, Fd, Header0, Options) ->
         fsync_options = FsyncOptions,
         header = Header,
         needs_commit = false,
-        id_tree = IdBtree,
-        seq_tree = SeqBtree,
-        local_tree = LocalDocsBtree
+        id_tree = IdTree,
+        seq_tree = SeqTree,
+        local_tree = LocalTree,
+        compression = Compression
     },
 
     % If we just created a new UUID while upgrading a
@@ -523,7 +550,7 @@ init_state(FilePath, Fd, Header0, Options) ->
     % uuid each time it was reopened.
     case Header /= Header0 of
         true ->
-            {ok, sync_header(St, Header)};
+            {ok, commit_data(St)};
         false ->
             {ok, St}
     end.
@@ -544,7 +571,7 @@ delete_compaction_files(FilePath) ->
 
 delete_compaction_files(RootDir, FilePath) ->
     lists:foreach(fun(Ext) ->
-        couch_file:delete(Server#server.root_dir, FullFilepath ++ Ext)
+        couch_file:delete(RootDir, FilePath ++ Ext)
     end, [".compact", ".compact.data", ".compact.meta"]).
 
 
@@ -561,14 +588,14 @@ rev_tree(DiskTree) ->
                 deleted = ?i2b(Del),
                 ptr = Ptr,
                 seq = Seq,
-                sizes = upgrade_sizes(Size)
+                sizes = couch_db_updater:upgrade_sizes(Size)
             };
         (_RevId, {Del, Ptr, Seq, Sizes, Atts}) ->
             #leaf{
                 deleted = ?i2b(Del),
                 ptr = Ptr,
                 seq = Seq,
-                sizes = upgrade_sizes(Sizes),
+                sizes = couch_db_updater:upgrade_sizes(Sizes),
                 atts = Atts
             };
         (_RevId, ?REV_MISSING) ->
@@ -610,7 +637,9 @@ reduce_sizes(#size_info{}=S1, #size_info{}=S2) ->
         external = S1#size_info.external + S2#size_info.external
     };
 reduce_sizes(S1, S2) ->
-    reduce_sizes(upgrade_sizes(S1), upgrade_sizes(S2)).
+    US1 = couch_db_updater:upgrade_sizes(S1),
+    US2 = couch_db_updater:upgrade_sizes(S2),
+    reduce_sizes(US1, US2).
 
 
 active_size(#st{} = St, Size) when is_integer(Size) ->
