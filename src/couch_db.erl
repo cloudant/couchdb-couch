@@ -78,16 +78,16 @@ open(DbName, Options) ->
         Else -> Else
     end.
 
-reopen(#db{main_pid = Pid, fd = Fd, fd_monitor = OldRef, user_ctx = UserCtx}) ->
-    {ok, #db{fd = NewFd} = NewDb} = gen_server:call(Pid, get_db, infinity),
-    case NewFd =:= Fd of
-    true ->
-        {ok, NewDb#db{user_ctx = UserCtx}};
-    false ->
-        erlang:demonitor(OldRef, [flush]),
-        NewRef = erlang:monitor(process, NewFd),
-        {ok, NewDb#db{user_ctx = UserCtx, fd_monitor = NewRef}}
-    end.
+reopen(#db{} = Db) ->
+    % We could have just swapped out the storage engine
+    % for this database during a compaction so we just
+    % reimplement this as a close/open pair now.
+    #db{
+        main_pid = Pid,
+        engine = {Engine, EngineState}
+    } = Db,
+    ok = Engine:close(EngineState),
+    open(Db#db.name, [{user_ctx, Db#db.user_ctx} | Db#db.options]).
 
 is_system_db(#db{options = Options}) ->
     lists:member(sys_db, Options).
@@ -101,9 +101,11 @@ ensure_full_commit(Db, RequiredSeq) ->
     ok = gen_server:call(Pid, {full_commit, RequiredSeq}, infinity),
     {ok, StartTime}.
 
-close(#db{fd_monitor=Ref}) ->
-    erlang:demonitor(Ref, [flush]),
-    ok.
+close(#db{} = Db) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    ok = Engine:close(EngineState).
 
 is_idle(#db{compactor_pid=nil, waiting_delayed_commit=nil} = Db) ->
     monitored_by(Db) == [];
@@ -111,12 +113,15 @@ is_idle(_Db) ->
     false.
 
 monitored_by(Db) ->
-    case erlang:process_info(Db#db.fd, monitored_by) of
-    undefined ->
-        [];
-    {monitored_by, Pids} ->
-        PidTracker = whereis(couch_stats_process_tracker),
-        Pids -- [Db#db.main_pid, PidTracker]
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    case Engine:monitored_by(EngineState) of
+        Pids when is_list(Pids) ->
+            PidTracker = whereis(couch_stats_process_tracker),
+            Pids -- [Db#db.main_pid, PidTracker];
+        undefined ->
+            []
     end.
 
 
@@ -264,7 +269,10 @@ get_full_doc_info(Db, Id) ->
     Result.
 
 get_full_doc_infos(Db, Ids) ->
-    couch_btree:lookup(Db#db.id_tree, Ids).
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:open_docs(EngineState, Ids).
 
 purge_docs(#db{main_pid=Pid}, IdsRevs) ->
     gen_server:call(Pid, {purge_docs, IdsRevs}).
@@ -272,56 +280,51 @@ purge_docs(#db{main_pid=Pid}, IdsRevs) ->
 get_committed_update_seq(#db{committed_update_seq=Seq}) ->
     Seq.
 
-get_update_seq(#db{update_seq=Seq})->
-    Seq.
+get_update_seq(#db{} = Db)->
+    get_prop(Db, update_seq).
 
 get_purge_seq(#db{}=Db) ->
-    couch_db_header:purge_seq(Db#db.header).
+    get_prop(Db, purge_seq).
 
 get_last_purged(#db{}=Db) ->
-    case couch_db_header:purged_docs(Db#db.header) of
-        nil ->
-            {ok, []};
-        Pointer ->
-            couch_file:pread_term(Db#db.fd, Pointer)
-    end.
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:get_last_purged(EngineState).
 
 get_doc_count(Db) ->
-    {ok, {Count, _, _}} = couch_btree:full_reduce(Db#db.id_tree),
-    {ok, Count}.
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:get_doc_count(EngineState).
+
+get_del_doc_count(Db) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:get_del_doc_count(EngineState).
 
 get_uuid(#db{}=Db) ->
-    couch_db_header:uuid(Db#db.header).
+    get_prop(Db, uuid).
 
 get_epochs(#db{}=Db) ->
-    couch_db_header:epochs(Db#db.header).
+    get_prop(Db, epochs).
 
 get_compacted_seq(#db{}=Db) ->
-    couch_db_header:compacted_seq(Db#db.header).
+    get_prop(Db, compacted_seq).
 
 get_db_info(Db) ->
-    #db{fd=Fd,
-        header=Header,
-        compactor_pid=Compactor,
-        update_seq=SeqNum,
-        name=Name,
-        instance_start_time=StartTime,
-        committed_update_seq=CommittedUpdateSeq,
-        id_tree = IdBtree
+    #db{
+        name = Name,
+        engine = {Engine, EngineState},
+        compactor_pid = Compactor,
+        instance_start_time = StartTime,
+        committed_update_seq=CommittedUpdateSeq
     } = Db,
-    {ok, FileSize} = couch_file:bytes(Fd),
-    {ok, DbReduction} = couch_btree:full_reduce(IdBtree),
-    SizeInfo0 = element(3, DbReduction),
-    SizeInfo = case SizeInfo0 of
-        SI when is_record(SI, size_info) ->
-            SI;
-        {AS, ES} ->
-            #size_info{active=AS, external=ES};
-        AS ->
-            #size_info{active=AS}
-    end,
-    ActiveSize = active_size(Db, SizeInfo),
-    DiskVersion = couch_db_header:disk_version(Header),
+    {ok, DocCount} = get_doc_count(Db),
+    {ok, DelDocCount} = get_del_doc_count(Db),
+    SizeInfo = Engine:get_size_info(EngineState),
+    DiskVersion = get_prop(Db, disk_version),
     Uuid = case get_uuid(Db) of
         undefined -> null;
         Uuid0 -> Uuid0
@@ -332,63 +335,33 @@ get_db_info(Db) ->
     end,
     InfoList = [
         {db_name, Name},
-        {doc_count, element(1, DbReduction)},
-        {doc_del_count, element(2, DbReduction)},
+        {engine, Engine},
+        {doc_count, DocCount},
+        {doc_del_count, DelDocCount},
         {update_seq, SeqNum},
-        {purge_seq, couch_db:get_purge_seq(Db)},
-        {compact_running, Compactor/=nil},
-        {disk_size, FileSize}, % legacy
-        {other, {[{data_size, SizeInfo#size_info.external}]}}, % legacy
-        {data_size, ActiveSize}, % legacy
-        {sizes, {[
-            {file, FileSize},
-            {active, ActiveSize},
-            {external, SizeInfo#size_info.external}
-        ]}},
+        {purge_seq, get_prop(Db, purge_seq)},
+        {compact_running, Compactor /= nil},
+        {sizes, {SizeInfo}},
         {instance_start_time, StartTime},
         {disk_format_version, DiskVersion},
         {committed_update_seq, CommittedUpdateSeq},
         {compacted_seq, CompactedSeq},
         {uuid, Uuid}
-        ],
+    ],
     {ok, InfoList}.
 
-active_size(#db{}=Db, Size) when is_integer(Size) ->
-    active_size(Db, #size_info{active=Size});
-active_size(#db{}=Db, #size_info{}=SI) ->
-    Trees = [
-        Db#db.id_tree,
-        Db#db.seq_tree,
-        Db#db.local_tree
-    ],
-    lists:foldl(fun(T, Acc) ->
-        case couch_btree:size(T) of
-            _ when Acc == null ->
-                null;
-            undefined ->
-                null;
-            Size ->
-                Acc + Size
-        end
-    end, SI#size_info.active, Trees).
+
 
 get_design_docs(#db{name = <<"shards/", _:18/binary, DbName/binary>>}) ->
     {_, Ref} = spawn_monitor(fun() -> exit(fabric:design_docs(DbName)) end),
     receive {'DOWN', Ref, _, _, Response} ->
         Response
     end;
-get_design_docs(#db{id_tree = IdBtree}) ->
-    FoldFun = pipe([fun skip_deleted/4], fun
-        (#full_doc_info{deleted = true}, _Reds, Acc) ->
-            {ok, Acc};
-        (#full_doc_info{id= <<"_design/",_/binary>>}=FullDocInfo, _Reds, Acc) ->
-            {ok, [FullDocInfo | Acc]};
-        (_, _Reds, Acc) ->
-            {stop, Acc}
-    end),
-    KeyOpts = [{start_key, <<"_design/">>}, {end_key_gt, <<"_design0">>}],
-    {ok, _, Docs} = couch_btree:fold(IdBtree, FoldFun, [], KeyOpts),
-    {ok, Docs}.
+get_design_docs(#db{} = Db) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:get_design_docs(EngineState).
 
 check_is_admin(#db{} = Db) ->
     case is_admin(Db) of
@@ -1404,71 +1377,6 @@ increment_stat(#db{options = Options}, Stat) ->
         couch_stats:increment_counter(Stat)
     end.
 
-skip_deleted(traverse, LK, {Undeleted, _, _} = Reds, Acc) when Undeleted == 0 ->
-    {skip, LK, Reds, Acc};
-skip_deleted(Case, A, B, C) ->
-    {Case, A, B, C}.
-
-stop_on_leaving_namespace(NS) ->
-    fun
-        (visit, #full_doc_info{id = Key} = FullInfo, Reds, Acc) ->
-            case has_prefix(Key, NS) of
-                true ->
-                    {visit, FullInfo, Reds, Acc};
-                false ->
-                    {stop, FullInfo, Reds, Acc}
-            end;
-        (Case, KV, Reds, Acc) ->
-            {Case, KV, Reds, Acc}
-    end.
-
-has_prefix(Bin, Prefix) ->
-    S = byte_size(Prefix),
-    case Bin of
-        <<Prefix:S/binary, "/", _/binary>> ->
-            true;
-        _Else ->
-            false
-    end.
-
-pipe(Filters, Final) ->
-    Wrap =
-        fun
-            (visit, KV, Reds, Acc) ->
-                Final(KV, Reds, Acc);
-            (skip, _KV, _Reds, Acc) ->
-                {skip, Acc};
-            (stop, _KV, _Reds, Acc) ->
-                {stop, Acc};
-            (traverse, _, _, Acc) ->
-                {ok, Acc}
-        end,
-    do_pipe(Filters, Wrap).
-
-do_pipe([], Fun) -> Fun;
-do_pipe([Filter|Rest], F0) ->
-    F1 = fun(C0, KV0, Reds0, Acc0) ->
-        {C, KV, Reds, Acc} = Filter(C0, KV0, Reds0, Acc0),
-        F0(C, KV, Reds, Acc)
-    end,
-    do_pipe(Rest, F1).
-
-set_namespace_range(Options, undefined) -> Options;
-set_namespace_range(Options, NS) ->
-    %% FIXME depending on order we might need to swap keys
-    SK = select_gt(
-           proplists:get_value(start_key, Options, <<"">>),
-           <<NS/binary, "/">>),
-    EK = select_lt(
-           proplists:get_value(end_key, Options, <<NS/binary, "0">>),
-           <<NS/binary, "0">>),
-    [{start_key, SK}, {end_key_gt, EK}].
-
-select_gt(V1, V2) when V1 < V2 -> V2;
-select_gt(V1, _V2) -> V1.
-
-select_lt(V1, V2) when V1 > V2 -> V2;
-select_lt(V1, _V2) -> V1.
 
 normalize_dbname(<<"shards/", _/binary>> = Path) ->
     lists:last(binary:split(mem3:dbname(Path), <<"/">>, [global]));
@@ -1503,3 +1411,13 @@ is_systemdb(<<"shards/", _/binary>> = Path) when is_binary(Path) ->
     is_systemdb(normalize_dbname(Path));
 is_systemdb(DbName) when is_binary(DbName) ->
     lists:member(DbName, ?SYSTEM_DATABASES).
+
+get_prop(Db, Key) ->
+    get_prop(Db, Key, undefined).
+
+
+get_prop(Db, Key, Default) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:get(EngineState, Key, Default).

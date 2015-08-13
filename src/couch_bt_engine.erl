@@ -174,6 +174,27 @@ is_current_stream(_, _) ->
     false.
 
 
+open_docs(adf) ->
+    ok.
+
+
+get_design_docs(St) ->
+    FoldFun = pipe([fun skip_deleted/4], fun
+        (#full_doc_info{deleted = true}, _Reds, Acc) ->
+            {ok, Acc};
+        (#full_doc_info{id = Id} = FDI, _Reds, Acc) ->
+            case Id of
+                <<?DESIGN_DOC_PREFIX/binary, _/binary>> ->
+                    {ok, [FDI | Acc]};
+                _ ->
+                    {stop, Acc}
+            end
+    end),
+    KeyOpts = [{start_key, <<"_design/">>}, {end_key_gt, <<"_design0">>}],
+    {ok, _, Docs} = couch_btree:fold(St#st.id_tree, FoldFun, [], KeyOpts),
+    {ok, lists:reverse(Docs)}.
+    
+
 write_summary(St, SummaryBinary) ->
     #st{
         fd = Fd
@@ -181,8 +202,48 @@ write_summary(St, SummaryBinary) ->
     couch_file:append_raw_chunk(Fd, SummaryBinary).
 
 
-write_doc_infos(St, FullDocInfos, RemoveSeqs, LocalDocs) ->
+write_doc_infos(#st{} = St, FullDocInfos, RemoveSeqs, LocalDocs) ->
     ok.
+
+
+get_last_purged(#st{} = St) ->
+    case ?MODULE:get(St, purged_docs, nil) of
+        nil ->
+            {ok, []};
+        Pointer ->
+            couch_file:pread_term(St#st.fd, Pointer)
+    end.
+
+
+get_doc_count(#st{} = St) ->
+    {ok, {Count, _, _}} = couch_btree:full_reduce(St#st.id_tree),
+    {ok, Count}.
+
+
+get_del_doc_count(#st{} = St) ->
+    {ok, {_, DelCount, _}} = couch_btree:full_reduce(St#st.id_tree),
+    {ok, DelCount}.
+
+
+get_size_info(#st{} = St) ->
+    {ok, FileSize} = couch_file:bytes(St#st.fd),
+    {ok, DbReduction} = couch_btree:full_reduce(St#st.id_tree),
+    SizeInfo0 = element(3, DbReduction),
+    SizeInfo = case SizeInfo0 of
+        SI when is_record(SI, size_info) ->
+            SI;
+        {AS, ES} ->
+            #size_info{active=AS, external=ES};
+        AS ->
+            #size_info{active=AS}
+    end,
+    ActiveSize = active_size(Db, SizeInfo),
+    ExternalSize = SizeInfo#size_info.external,
+    [
+        {active, ActiveSize},
+        {external, ExternalSize},
+        {file, FileSize}
+    ].
 
 
 start_compaction(St) ->
@@ -503,5 +564,88 @@ reduce_sizes(S1, S2) ->
     reduce_sizes(upgrade_sizes(S1), upgrade_sizes(S2)).
 
 
+active_size(#st{} = St, Size) when is_integer(Size) ->
+    active_size(St, #size_info{active=Size});
+active_size(#st{} = St, #size_info{} = SI) ->
+    Trees = [
+        St#st.id_tree,
+        St#st.seq_tree,
+        St#st.local_tree
+    ],
+    lists:foldl(fun(T, Acc) ->
+        case couch_btree:size(T) of
+            _ when Acc == null ->
+                null;
+            undefined ->
+                null;
+            Size ->
+                Acc + Size
+        end
+    end, SI#size_info.active, Trees).
 
 
+skip_deleted(traverse, LK, {Undeleted, _, _} = Reds, Acc) when Undeleted == 0 ->
+    {skip, LK, Reds, Acc};
+skip_deleted(Case, A, B, C) ->
+    {Case, A, B, C}.
+
+stop_on_leaving_namespace(NS) ->
+    fun
+        (visit, #full_doc_info{id = Key} = FullInfo, Reds, Acc) ->
+            case has_prefix(Key, NS) of
+                true ->
+                    {visit, FullInfo, Reds, Acc};
+                false ->
+                    {stop, FullInfo, Reds, Acc}
+            end;
+        (Case, KV, Reds, Acc) ->
+            {Case, KV, Reds, Acc}
+    end.
+
+has_prefix(Bin, Prefix) ->
+    S = byte_size(Prefix),
+    case Bin of
+        <<Prefix:S/binary, "/", _/binary>> ->
+            true;
+        _Else ->
+            false
+    end.
+
+pipe(Filters, Final) ->
+    Wrap =
+        fun
+            (visit, KV, Reds, Acc) ->
+                Final(KV, Reds, Acc);
+            (skip, _KV, _Reds, Acc) ->
+                {skip, Acc};
+            (stop, _KV, _Reds, Acc) ->
+                {stop, Acc};
+            (traverse, _, _, Acc) ->
+                {ok, Acc}
+        end,
+    do_pipe(Filters, Wrap).
+
+do_pipe([], Fun) -> Fun;
+do_pipe([Filter|Rest], F0) ->
+    F1 = fun(C0, KV0, Reds0, Acc0) ->
+        {C, KV, Reds, Acc} = Filter(C0, KV0, Reds0, Acc0),
+        F0(C, KV, Reds, Acc)
+    end,
+    do_pipe(Rest, F1).
+
+set_namespace_range(Options, undefined) -> Options;
+set_namespace_range(Options, NS) ->
+    %% FIXME depending on order we might need to swap keys
+    SK = select_gt(
+           proplists:get_value(start_key, Options, <<"">>),
+           <<NS/binary, "/">>),
+    EK = select_lt(
+           proplists:get_value(end_key, Options, <<NS/binary, "0">>),
+           <<NS/binary, "0">>),
+    [{start_key, SK}, {end_key_gt, EK}].
+
+select_gt(V1, V2) when V1 < V2 -> V2;
+select_gt(V1, _V2) -> V1.
+
+select_lt(V1, V2) when V1 > V2 -> V2;
+select_lt(V1, _V2) -> V1.
