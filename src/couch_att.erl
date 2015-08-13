@@ -541,11 +541,14 @@ flush_data(Db, {stream, StreamEngine}, Att) ->
         true ->
             % Already written
             Att;
-        false ->            
-            [InMd5, InDiskLen] = fetch([md5, disk_len], Att),
-            couch_db:with_stream(Db, Att, fun(OutputStream) ->
-                couch_stream:copy(StreamData, OutputStream)
-            end)
+        false ->
+            NewAtt = couch_db:with_stream(Db, Att, fun(OutputStream) ->
+                couch_stream:copy(StreamEngine, OutputStream)
+            end),
+            InMd5 = fetch(md5, Att),
+            OutMd5 = fetch(md5, NewAtt),
+            couch_util:check_md5(InMd5, OutMd5),
+            NewAtt
     end.
 
 

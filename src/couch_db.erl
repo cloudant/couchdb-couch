@@ -36,6 +36,10 @@
 -export([normalize_dbname/1]).
 -export([validate_dbname/1]).
 
+
+-export([open_write_stream/2, open_read_stream/2, is_active_stream/2]).
+-export([fold_changes_fun/2]).
+
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_db_int.hrl").
 
@@ -83,7 +87,6 @@ reopen(#db{} = Db) ->
     % for this database during a compaction so we just
     % reimplement this as a close/open pair now.
     #db{
-        main_pid = Pid,
         engine = {Engine, EngineState}
     } = Db,
     ok = Engine:close(EngineState),
