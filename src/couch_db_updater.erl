@@ -210,12 +210,13 @@ handle_cast(start_compact, Db) ->
             {noreply, Db}
     end;
 handle_cast({compact_done, CompactEngine, CompactFilePath}, #db{} = OldDb) ->
-    case Db#db.engine of
+    NewDb = case Db#db.engine of
         {CompactEngine, _} ->
             finish_engine_compaction(OldDb, CompactFilePath);
         {_DifferentEngine, _} ->
             finish_engine_swap(OldDb, CompactEngine, CompactFilePath)
-    end;
+    end,
+    {noreply, NewDb};
 
 handle_cast(Msg, #db{name = Name} = Db) ->
     couch_log:error("Database `~s` updater received unexpected cast: ~p",
@@ -353,10 +354,6 @@ init_db(DbName, Engine, EngineState, Options) ->
         before_doc_update = BDU,
         after_doc_read = ADR
     }.
-
-
-close_db(#db{fd_monitor = Ref}) ->
-    erlang:demonitor(Ref).
 
 
 refresh_validate_doc_funs(#db{name = <<"shards/", _/binary>> = Name} = Db) ->
@@ -710,46 +707,41 @@ get_update_seq(Db) ->
     Engine:get(EngineState, update_seq).
 
 
-finalize_compaction(OldDb, NewDb) ->
+finish_engine_compaction(OldDb, CompactFilePath)
     #db{
-        engine = {OldEngine, OldEngineState}
+        engine = {Engine, OldState}
     } = OldDb,
-    #db{
-        engine = {NewEngine, NewEngineState}
-    } = NewDb,
+    {ok, NewState1} = Engine:init(CompactFilePath, OldDb#db.options),
+    OldSeq = Engine:get(OldState, update_seq),
+    NewSeq = Engine:get(NewState1, update_seq),
+    case OldSeq == NewSeq of
+        true ->
+            {ok, NewState2} = Engine:finish_compaction(OldState, NewState1),
+            NewDb1 = OldDb#db{
+                engine = {Engine, NewState2},
+                compaction_pid = nil
+            }
+            NewDb2 = refresh_validate_doc_funs(NewDb1),
+            ok = gen_server:call(couch_server, {db_updated, NewDb2}, infinity),
+            couch_event:notify(NewDb2#db.name, compacted),
+            Arg = [NewDb2#db.name],
+            couch_log:info("Compaction for db \"~s\" completed.", Arg),
+            NewDb2;
+        false ->
+            ok = Engine:close(NewState1),
+            NewDb = OldDb#db{
+                compaction_pid = Engine:start_compaction(OldState, self())
+            },
+            couch_log:info("Compaction file still behind main file "
+                           "(update seq=~p. compact update seq=~p). Retrying.",
+                           [OldSeq, NewSeq]),
+            ok = gen_server:call(couch_server, {db_updated, NewDb}, infinity),
+            NewDb
+    end.
 
-    CompactedSeq = get_update_seq(OldDb),
 
-    {ok, LocalDocs} = OldEngine:read_local_docs(OldEngineState),
-    {ok, NewState1} = NewEngine:write_docs(NewEngineState, [], [], LocalDocs),
-    {ok, NewState2} = NewEngine:set(NewState1, compacted_seq, CompactedSeq),
-    {ok, NewState3} = NewEngine:commit_data(NewState2),
-    {ok, NewState4} = NewEngine:finalize_compaction(NewState3, )
-
-    NewDb#db{
-        main_pid = self(),
-        engine = {NewEngine, NewState4},
-        instance_start_time = OldDb#db.instance_start_time
-    }.
-
-
-close_and_delete(#db{} = Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    RootDir = config:get("couchdb", "database_dir", "."),
-    ok = Engine:delete(St, RootDir)
-    Engine:close(St).
-
-
-final_compaction_swap(#db{} = Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    {ok, NewState} = Engine:final_compaction_swap(EngineState),
-    Db#db{
-        engine = {Engine, NewState}
-    }.
+finish_engine_swap(OldDb, NewEngine, CompactFilePath) ->
+    erlang:error(explode).
 
 
 make_doc_summary(#db{compression = Comp}, {Body0, Atts0}) ->

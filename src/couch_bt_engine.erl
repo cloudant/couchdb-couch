@@ -189,13 +189,51 @@ start_compaction(St) ->
     ok.
 
 
-finalize_compaction(St) ->
-    % Assert St#st.filepath ends with .compact.data
-    DestPath = remove_data_suffix(St#st.filepath),
-    ok = file:rename(St#st.filepath, DestPath),
-    couch_file:delete(RootDir, Filepath ++ ".meta"),
-    {ok, St#st{filepath = DestPath}}.
-    
+finish_compaction(#st{} = OldSt, #st{} = NewSt1) ->
+    #st{
+        filepath = FilePath,
+        local_tree = OldLocal
+    } = OldSt,
+    #st{
+        filepath = CompactDataPath,
+        local_tree = NewLocal1
+    } = NewSt1,
+
+    % suck up all the local docs into memory and write them to the new db
+    LoadFun = fun(Value, _Offset, Acc) ->
+        {ok, [Value | Acc]}
+    end,
+    {ok, _, LocalDocs} = couch_btree:foldl(OldLocal, LoadFun, []),
+    {ok, NewLocal2} = couch_btree:add(NewLocal1, LocalDocs),
+
+    NewSt2 = ?MODULE:set(NewSt1, compact_seq, ?MODULE:get(OldSt, update_seq)),
+    NewSt3 = commit_data(NewSt2#st{
+        local_tree = NewLocal2,
+    }),
+
+    % Rename our *.compact.data file to *.compact so that if we
+    % die between deleting the old file and renaming *.compact
+    % we can recover correctly.
+    ok = file:rename(CompactDataPath, Filepath ++ ".compact"),
+
+    % Remove the uncompacted database file
+    RootDir = config:get("couchdb", "database_dir", "."),
+    delete(RootDir, FilePath, true),
+
+    % Move our compacted file into its final location
+    ok = file:rename(FilePath ++ ".compact", FilePath),
+
+    % Delete the old meta compaction file after promoting
+    % the compaction file.
+    delete(RootDir, FilePath ++ ".compact.meta"),
+
+    % We're finished with our old state
+    close(OldSt),
+
+    % And return our finished new state
+    NewSt3#st{
+        filepath = FilePath
+    }.    
 
 
 id_tree_split(#full_doc_info{}=Info) ->
