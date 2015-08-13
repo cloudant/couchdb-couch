@@ -20,7 +20,7 @@
     main_pid = nil,
     compactor_pid = nil,
 
-    commited_update_seq,
+    committed_update_seq,
 
     instance_start_time, % number of microsecs since jan 1 1970 as a binary string
 

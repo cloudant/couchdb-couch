@@ -15,17 +15,17 @@
 -export([open/2,open_int/2,close/1,create/2,get_db_info/1,get_design_docs/1]).
 -export([start_compact/1, cancel_compact/1]).
 -export([wait_for_compaction/1, wait_for_compaction/2]).
--export([is_idle/1,monitor/1,count_changes_since/2]).
+-export([is_idle/1,monitor/1]).
 -export([update_doc/3,update_doc/4,update_docs/4,update_docs/2,update_docs/3,delete_doc/3]).
 -export([get_doc_info/2,get_full_doc_info/2,get_full_doc_infos/2]).
 -export([open_doc/2,open_doc/3,open_doc_revs/4]).
 -export([set_revs_limit/2,get_revs_limit/1]).
 -export([get_missing_revs/2,name/1,get_update_seq/1,get_committed_update_seq/1]).
 -export([get_uuid/1, get_epochs/1, get_compacted_seq/1]).
--export([enum_docs/4,enum_docs_since/5]).
--export([enum_docs_since_reduce_to_count/1,enum_docs_reduce_to_count/1]).
 -export([get_purge_seq/1,purge_docs/2,get_last_purged/1]).
--export([start_link/3,open_doc_int/3,ensure_full_commit/1,ensure_full_commit/2]).
+-export([start_link/4,open_doc_int/3,ensure_full_commit/1,ensure_full_commit/2]).
+-export([fold_docs/3, fold_docs/4]).
+-export([fold_changes/4, fold_changes/5, count_changes_since/2]).
 -export([set_security/2,get_security/1]).
 -export([changes_since/4,changes_since/5,read_doc/2,new_revid/1]).
 -export([check_is_admin/1, is_admin/1, check_is_member/1, get_doc_count/1]).
@@ -338,7 +338,7 @@ get_db_info(Db) ->
         {engine, Engine},
         {doc_count, DocCount},
         {doc_del_count, DelDocCount},
-        {update_seq, SeqNum},
+        {update_seq, get_update_seq(Db)},
         {purge_seq, get_prop(Db, purge_seq)},
         {compact_running, Compactor /= nil},
         {sizes, {SizeInfo}},
@@ -468,8 +468,11 @@ validate_names_and_roles({Props}) when is_list(Props) ->
     end,
     ok.
 
-get_revs_limit(#db{revs_limit=Limit}) ->
-    Limit.
+get_revs_limit(#db{} = Db) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:get(EngineState, revs_limit).
 
 set_revs_limit(#db{main_pid=Pid}=Db, Limit) when Limit > 0 ->
     check_is_admin(Db),
@@ -727,12 +730,13 @@ prep_and_validate_replicated_updates(Db, [Bucket|RestBuckets], [OldInfo|RestOldI
             {[], AccErrors}, Bucket),
         prep_and_validate_replicated_updates(Db, RestBuckets, RestOldInfo, [ValidatedBucket | AccPrepped], AccErrors3);
     {ok, #full_doc_info{rev_tree=OldTree}} ->
+        RevsLimit = get_revs_limit(Db),
         OldLeafs = couch_key_tree:get_all_leafs_full(OldTree),
         OldLeafsLU = [{Start, RevId} || {Start, [{RevId, _}|_]} <- OldLeafs],
         NewRevTree = lists:foldl(
             fun(NewDoc, AccTree) ->
                 {NewTree, _} = couch_key_tree:merge(AccTree,
-                    couch_doc:to_path(NewDoc), Db#db.revs_limit),
+                    couch_doc:to_path(NewDoc), RevsLimit),
                 NewTree
             end,
             OldTree, Bucket),
@@ -1150,7 +1154,7 @@ open_write_stream(Db, Options) ->
     #db{
         engine = {Engine, EngineState}
     } = Db,
-    Engine:open_write_stream(EngineState, Options),
+    Engine:open_write_stream(EngineState, Options).
 
 
 open_read_stream(Db, AttState) ->
@@ -1203,7 +1207,9 @@ fold_changes(Db, StartSeq, UserFun, UserAcc, Options) ->
 
 
 fold_changes_fun(#full_doc_info{} = FDI, {Options, UserFun, UserAcc}) ->
-    Doc = convert(FDI, Options),
+    %Doc = convert(FDI, Options),
+    % THIS WILL BREAK:
+    Doc = FDI,
     {Go, NewUserAcc} = UserFun(Doc, UserAcc),
     {Go, {Options, UserFun, NewUserAcc}}.
 
@@ -1321,7 +1327,7 @@ doc_meta_info(#doc_info{high_seq=Seq,revs=[#rev_info{rev=Rev}|RestInfo]}, RevTre
 read_doc(#db{} = Db, Ptr) ->
     #db{
         engine = {Engine, EngineState}
-    }
+    } = Db,
     Engine:read_doc(EngineState, Ptr).
 
 
