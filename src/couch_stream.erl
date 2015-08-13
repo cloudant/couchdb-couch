@@ -18,6 +18,7 @@
 -export([open/1, open/2, close/1]).
 -export([foldl/4, foldl/5, foldl_decode/6, range_foldl/6]).
 -export([copy_to_new_stream/3, write/2]).
+-export([to_disk_term/1]).
 
 % gen_server callbacks
 -export([init/1, terminate/2, code_change/3]).
@@ -58,6 +59,10 @@ copy(Src, Dst) ->
     foldl(Src, fun(Bin, _) ->
         ok = write(Dst, Bin)
     end, ok).
+
+
+to_disk_term({Engine, EngineState}) ->
+    Engine:to_disk_term(EngineState).
 
 
 foldl({Engine, EngineState}, Fun, Acc) ->

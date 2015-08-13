@@ -16,7 +16,8 @@
     foldl/3,
     seek/2,
     write/2,
-    finalize/1
+    finalize/1,
+    to_disk_term/1
 ]).
 
 
@@ -62,3 +63,8 @@ write({Fd, Written}, Data) when is_pid(Fd) ->
 
 finalize({Fd, Written}) ->
     {Fd, lists:reverse(Written)}.
+
+
+to_disk_term({_Fd, Written}) ->
+    Written.
+

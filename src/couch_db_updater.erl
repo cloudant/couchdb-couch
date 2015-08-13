@@ -22,18 +22,6 @@
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_db_int.hrl").
 
--record(comp_header, {
-    db_header,
-    meta_state
-}).
-
--record(merge_st, {
-    id_tree,
-    seq_tree,
-    curr,
-    rem_seqs,
-    infos
-}).
 
 
 init({Engine, DbName, FilePath, Options}) ->
@@ -201,7 +189,8 @@ handle_cast(start_compact, Db) ->
             % type to compact to with a new copy compactor.
             couch_log:info("Starting compaction for db \"~s\"", [Db#db.name]),
             {Engine, EngineState} = Db#db.engine,
-            Pid = Engine:start_compaction(EngineState, self()),
+            Pid = Engine:start_compaction(
+                    EngineState, Db#db.name, Db#db.options, self()),
             Db2 = Db#db{compactor_pid = Pid},
             ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
             {noreply, Db2};
@@ -341,6 +330,8 @@ init_db(DbName, Engine, EngineState, Options) ->
     StartTime = ?l2b(io_lib:format("~p",
             [(MegaSecs*1000000*1000000) + (Secs*1000000) + MicroSecs])),
 
+    {ok, SecProps} = Engine:get_security(EngineState),
+
     BDU = couch_util:get_value(before_doc_update, Options, nil),
     ADR = couch_util:get_value(after_doc_read, Options, nil),
 
@@ -348,7 +339,7 @@ init_db(DbName, Engine, EngineState, Options) ->
         name = DbName,
         engine = {Engine, EngineState},
         committed_update_seq = Engine:get(EngineState, update_seq),
-        security = Engine:get(EngineState, security, []),
+        security = SecProps,
         instance_start_time = StartTime,
         options = Options,
         before_doc_update = BDU,
@@ -730,7 +721,8 @@ finish_engine_compaction(OldDb, CompactFilePath)
         false ->
             ok = Engine:close(NewState1),
             NewDb = OldDb#db{
-                compaction_pid = Engine:start_compaction(OldState, self())
+                compaction_pid = Engine:start_compaction(
+                        OldState, OldDb#db.name, OldDb#db.options, self())
             },
             couch_log:info("Compaction file still behind main file "
                            "(update seq=~p. compact update seq=~p). Retrying.",

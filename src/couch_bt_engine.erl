@@ -26,18 +26,7 @@
 ]).
 
 
-
--record(st, {
-    filepath,
-    fd,
-    fd_monitor,
-    fsync_options,
-    header,
-    needs_commit,
-    id_tree,
-    seq_tree,
-    local_tree
-}).
+-include("couch_bt_engine.hrl").
 
 
 exists(FilePath) ->
@@ -228,7 +217,19 @@ write_summary(St, SummaryBinary) ->
 
 
 write_doc_infos(#st{} = St, FullDocInfos, RemoveSeqs, LocalDocs) ->
-    ok.
+    #st{
+        id_tree = IdTree,
+        seq_tree = SeqTree,
+        local_tree = LocalTree
+    } = St,
+    {ok, IdTree2} = couch_btree:add_remove(IdTree, FullDocInfos, []),
+    {ok, SeqBTree2} = couch_btree:add_remove(SeqTree, FullDocInfos, RemoveSeqs),
+    {ok, LocalTree2} = couch_btree:add_remove(LocalTree, LocalDocs, []),
+    St#st{
+        id_tree = IdTree2,
+        seq_tree = SeqTree2,
+        local_tree = LocalTree2
+    }.
 
 
 open_write_stream(#st{} = St, Options) ->
@@ -243,6 +244,15 @@ is_active_stream(#st{} = St, {couch_bt_engine_stream, Fd, _}) ->
     St#st.fd == Fd;
 is_active_stream(_, _) ->
     false.
+
+
+get_security(#st{} = St) ->
+    case ?MODULE:get(St, security_ptr, nil) of
+        nil ->
+            {ok, []};
+        Pointer ->
+            couch_file:pread_term(St#st.fd, Pointer)
+    end.
 
 
 get_last_purged(#st{} = St) ->
@@ -285,8 +295,8 @@ get_size_info(#st{} = St) ->
     ].
 
 
-start_compaction(St) ->
-    ok.
+start_compaction(St, DbName, Parent) ->
+    spawn_link(couch_bt_engine_compactor, start, [St, DbName, Parent]).
 
 
 finish_compaction(#st{} = OldSt, #st{} = NewSt1) ->
