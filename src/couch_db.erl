@@ -1167,80 +1167,46 @@ is_active_stream(Db, StreamEngine) ->
     Engine:is_active_stream(EngineState, StreamEngine).
 
 
-enum_docs_since_reduce_to_count(Reds) ->
-    couch_btree:final_reduce(
-            fun couch_db_updater:btree_by_seq_reduce/2, Reds).
+fold_docs(Db, Fun, Acc) ->
+    fold_docs(Db, Fun, Acc, []).
 
-enum_docs_reduce_to_count(Reds) ->
-    FinalRed = couch_btree:final_reduce(
-            fun couch_db_updater:btree_by_id_reduce/2, Reds),
-    element(1, FinalRed).
 
-changes_since(Db, StartSeq, Fun, Acc) ->
-    changes_since(Db, StartSeq, Fun, [], Acc).
+fold_docs(Db, Fun, Acc, Options) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:fold_docs(EngineState, Fun, Acc, Options).
 
-changes_since(Db, StartSeq, Fun, Options, Acc) when is_record(Db, db) ->
-    changes_since(Db#db.seq_tree, StartSeq, Fun, Options, Acc);
-changes_since(SeqTree, StartSeq, Fun, Options, Acc) ->
-    Wrapper = fun(FullDocInfo, _Offset, Acc2) ->
-        DocInfo = case FullDocInfo of
-            #full_doc_info{} ->
-                couch_doc:to_doc_info(FullDocInfo);
-            #doc_info{} ->
-                FullDocInfo
-        end,
-        Fun(DocInfo, Acc2)
-    end,
-    {ok, _LastReduction, AccOut} = couch_btree:fold(SeqTree,
-        Wrapper, Acc, [{start_key, StartSeq + 1}] ++ Options),
-    {ok, AccOut}.
 
 count_changes_since(Db, SinceSeq) ->
-    BTree = Db#db.seq_tree,
-    {ok, Changes} =
-    couch_btree:fold_reduce(BTree,
-        fun(_SeqStart, PartialReds, 0) ->
-            {ok, couch_btree:final_reduce(BTree, PartialReds)}
-        end,
-        0, [{start_key, SinceSeq + 1}]),
-    Changes.
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:count_changes_since(EngineState, SinceSeq).
 
-enum_docs_since(Db, SinceSeq, InFun, Acc, Options) ->
-    {ok, LastReduction, AccOut} = couch_btree:fold(
-        Db#db.seq_tree, InFun, Acc,
-            [{start_key, SinceSeq + 1} | Options]),
-    {ok, enum_docs_since_reduce_to_count(LastReduction), AccOut}.
 
-enum_docs(Db, InFun, InAcc, Options0) ->
-    {NS, Options} = extract_namespace(Options0),
-    enum_docs(Db, NS, InFun, InAcc, Options).
+fold_changes(Db, StartSeq, Fun, Acc) ->
+    fold_changes(Db, StartSeq, Fun, Acc, []).
 
-enum_docs(Db, undefined, InFun, InAcc, Options) ->
-    FoldFun = pipe([fun skip_deleted/4], InFun),
-    {ok, LastReduce, OutAcc} = couch_btree:fold(
-        Db#db.id_tree, FoldFun, InAcc, Options),
-    {ok, enum_docs_reduce_to_count(LastReduce), OutAcc};
-enum_docs(Db, <<"_local">>, InFun, InAcc, Options) ->
-    FoldFun = pipe([fun skip_deleted/4], InFun),
-    {ok, _LastReduce, OutAcc} = couch_btree:fold(
-        Db#db.local_tree, FoldFun, InAcc, Options),
-    {ok, 0, OutAcc};
-enum_docs(Db, NS, InFun, InAcc, Options0) ->
-    FoldFun = pipe([
-        fun skip_deleted/4,
-        stop_on_leaving_namespace(NS)], InFun),
-    Options = set_namespace_range(Options0, NS),
-    {ok, LastReduce, OutAcc} = couch_btree:fold(
-        Db#db.id_tree, FoldFun, InAcc, Options),
-    {ok, enum_docs_reduce_to_count(LastReduce), OutAcc}.
 
-extract_namespace(Options0) ->
-    case proplists:split(Options0, [namespace]) of
-        {[[{namespace, NS}]], Options} ->
-            {NS, Options};
-        {_, Options} ->
-            {undefined, Options}
-    end.
+fold_changes(Db, StartSeq, UserFun, UserAcc, Options) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    FoldFun = fun ?MODULE:fold_changes_fun/2,
+    % Might want to grab a conversion function based
+    % on options here.
+    FoldAcc = {Options, UserFun, UserAcc},
+    {ok, Acc} = Engine:fold_changes(EngineState, StartSeq, FoldFun, FoldAcc),
+    {_, _, FinalUserAcc} = Acc,
+    {ok, FinalUserAcc}.
+
+
+fold_changes_fun(#full_doc_info{} = FDI, {Options, UserFun, UserAcc}) ->
+    Doc = convert(FDI, Options),
+    {Go, NewUserAcc} = UserFun(Doc, UserAcc),
+    {Go, {Options, UserFun, NewUserAcc}}.
+
 
 %%% Internal function %%%
 open_doc_revs_int(Db, IdRevs, Options) ->
@@ -1283,9 +1249,11 @@ open_doc_revs_int(Db, IdRevs, Options) ->
         IdRevs, LookupResults).
 
 open_doc_int(Db, <<?LOCAL_DOC_PREFIX, _/binary>> = Id, Options) ->
-    case couch_btree:lookup(Db#db.local_tree, [Id]) of
-    [{ok, {_, {Rev, BodyData}}}] ->
-        Doc = #doc{id=Id, revs={0, [?l2b(integer_to_list(Rev))]}, body=BodyData},
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    case Engine:open_local_docs(EngineState, [Id]) of
+    [#doc{} = Doc] ->
         apply_open_options({ok, Doc}, Options);
     [not_found] ->
         {not_found, missing}
@@ -1350,8 +1318,11 @@ doc_meta_info(#doc_info{high_seq=Seq,revs=[#rev_info{rev=Rev}|RestInfo]}, RevTre
     true -> [{local_seq, Seq}]
     end.
 
-read_doc(#db{fd=Fd}, Pos) ->
-    couch_file:pread_term(Fd, Pos).
+read_doc(#db{} = Db, Ptr) ->
+    #db{
+        engine = {Engine, EngineState}
+    }
+    Engine:read_doc(EngineState, Ptr).
 
 
 make_doc(_Db, Id, Deleted, nil = _Bp, RevisionPath) ->
@@ -1362,7 +1333,7 @@ make_doc(_Db, Id, Deleted, nil = _Bp, RevisionPath) ->
         atts = [],
         deleted = Deleted
     };
-make_doc(#db{fd=Fd}=Db, Id, Deleted, Bp, RevisionPath) ->
+make_doc(#db{} = Db, Id, Deleted, Bp, RevisionPath) ->
     {BodyData, Atts0} = case Bp of
         nil ->
             {[], []};
@@ -1375,7 +1346,7 @@ make_doc(#db{fd=Fd}=Db, Id, Deleted, Bp, RevisionPath) ->
                     {BodyData0, Atts1}
             end
     end,
-    Atts = [couch_att:from_disk_term(Fd, T) || T <- Atts0],
+    Atts = [couch_att:from_disk_term(Db, T) || T <- Atts0],
     Doc = #doc{
         id = Id,
         revs = RevisionPath,

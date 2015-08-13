@@ -168,14 +168,24 @@ store_security(#st{} = St, NewSecurity) ->
     set(St, security_ptr, Ptr).
 
 
-is_current_stream(#st{} = St, StreamFd) ->
-    StreamFd == St#st.fd;
-is_current_stream(_, _) ->
-    false.
+open_docs(#st{} = St, DocIds) ->
+    Results = couch_btree:lookup(St#st.id_tree, DocIds),
+    lists:map(fun
+        ({ok, FDI}) -> FDI;
+        (not_found) -> not_found
+    end, Results).
 
 
-open_docs(adf) ->
-    ok.
+open_local_docs(#st{} = St, DocIds) ->
+    Results = couch_btree:lookup(St#st.local_tree, DocIds),
+    lists:map(fun
+        ({ok, Doc}) -> Doc;
+        (not_found) -> not_found
+    end, Results).
+
+
+read_doc(#st{} = St, Pos) ->
+    couch_file:pread_term(St#st.fd, Pos).
 
 
 get_design_docs(St) ->
