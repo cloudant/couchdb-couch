@@ -351,7 +351,7 @@ handle_call({set_update_lru_on_read, UpdateOnRead}, _From, Server) ->
     {reply, ok, Server#server{update_lru_on_read=UpdateOnRead}};
 handle_call({set_max_dbs_open, Max}, _From, Server) ->
     {reply, ok, Server#server{max_dbs_open=Max}};
-handle_call(reload_engines, Server) ->
+handle_call(reload_engines, _From, Server) ->
     {reply, ok, Server#server{engines = get_configured_engines()}};
 handle_call(get_server, _From, Server) ->
     {reply, {ok, Server}, Server};
@@ -490,7 +490,7 @@ handle_call({delete, DbName, Options}, _From, Server) ->
         {Module, Filepath} = get_engine(Server, DbNameList),
         Async = not lists:member(sync, Options),
 
-        case Module:delete(Server#server.root_dir, FullFilepath, Async) of
+        case Module:delete(Server#server.root_dir, FilePath, Async) of
         ok ->
             couch_event:notify(DbName, deleted),
             {reply, ok, Server2};
@@ -658,7 +658,7 @@ get_default_engine(Server, DbName) ->
     Default = {couch_bt_engine, make_filename(RootDir, DbName, "couch")},
     case config:get("couchdb", "default_engine") of
         Extension when is_list(Extension) ->
-            case lists:keysearch(Engine, 1, Engines) of
+            case lists:keysearch(Extension, 1, Engines) of
                 {Extension, Module} ->
                     {Module, make_filename(RootDir, DbName, Extension)};
                 false ->
