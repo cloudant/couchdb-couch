@@ -13,6 +13,7 @@
     delete/3,
 
     sync/1,
+    commit_data/1,
 
     increment_update_seq/1,
     store_security/2,
@@ -22,8 +23,8 @@
     read_doc/2,
     get_design_docs/1,
 
-    make_summary/2,
-    write_summary/2,
+    make_doc_summary/2,
+    write_doc_summary/2,
     write_doc_infos/4,
 
     open_write_stream/2,
@@ -36,12 +37,21 @@
     get_del_doc_count/1,
     get_size_info/1,
 
-    start_compaction/3,
+    fold_docs/4,
+    fold_changes/5,
+    count_changes_since/2,
+
+    start_compaction/4,
     finish_compaction/2,
 
     get/2,
     get/3,
     set/3
+]).
+
+
+-export([
+    init_state/4
 ]).
 
 
@@ -228,7 +238,7 @@ get_design_docs(St) ->
     {ok, lists:reverse(Docs)}.
 
 
-make_summary(#st{} = St, {Body0, Atts0}) ->
+make_doc_summary(#st{} = St, {Body0, Atts0}) ->
     Comp = St#st.compression,
     Body = case couch_compress:is_compressed(Body0, Comp) of
         true -> Body0;
@@ -243,7 +253,7 @@ make_summary(#st{} = St, {Body0, Atts0}) ->
     couch_file:assemble_file_chunk(SummaryBin, couch_util:md5(SummaryBin)).
 
 
-write_summary(St, SummaryBinary) ->
+write_doc_summary(St, SummaryBinary) ->
     #st{
         fd = Fd
     } = St,
@@ -329,8 +339,20 @@ get_size_info(#st{} = St) ->
     ].
 
 
-start_compaction(St, DbName, Parent) ->
-    spawn_link(couch_bt_engine_compactor, start, [St, DbName, Parent]).
+fold_docs(St, UserFun, UserAcc, Options) ->
+    ok.
+
+fold_changes(St, SinceSeq, UserFun, UserAcc, Options) ->
+    ok.
+
+
+count_changes_since(St, SinceSeq) ->
+    ok.
+
+
+start_compaction(St, DbName, Options, Parent) ->
+    Args = [St, DbName, Options, Parent],
+    spawn_link(couch_bt_engine_compactor, start, Args).
 
 
 finish_compaction(#st{} = OldSt, #st{} = NewSt1) ->
@@ -509,17 +531,17 @@ init_state(FilePath, Fd, Header0, Options) ->
 
     IdTreeState = couch_db_header:id_tree_state(Header),
     {ok, IdTree} = couch_btree:open(IdTreeState, Fd, [
-            {split, fun ?MODULE:btree_by_id_split/1},
-            {join, fun ?MODULE:btree_by_id_join/2},
-            {reduce, fun ?MODULE:btree_by_id_reduce/2},
+            {split, fun ?MODULE:id_tree_split/1},
+            {join, fun ?MODULE:id_tree_join/2},
+            {reduce, fun ?MODULE:id_tree_reduce/2},
             {compression, Compression}
         ]),
 
     SeqTreeState = couch_db_header:seq_tree_state(Header),
     {ok, SeqTree} = couch_btree:open(SeqTreeState, Fd, [
-            {split, fun ?MODULE:btree_by_seq_split/1},
-            {join, fun ?MODULE:btree_by_seq_join/2},
-            {reduce, fun ?MODULE:btree_by_seq_reduce/2},
+            {split, fun ?MODULE:seq_tree_split/1},
+            {join, fun ?MODULE:seq_tree_join/2},
+            {reduce, fun ?MODULE:seq_tree_reduce/2},
             {compression, Compression}
         ]),
 

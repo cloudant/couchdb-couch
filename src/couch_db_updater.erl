@@ -14,7 +14,7 @@
 -behaviour(gen_server).
 -vsn(1).
 
--export([make_doc_summary/2]).
+-export([make_doc_summary/2, add_sizes/3, upgrade_sizes/1]).
 -export([init/1,terminate/2,handle_call/3,handle_cast/2,code_change/3,handle_info/2]).
 
 -include_lib("couch/include/couch_db.hrl").
@@ -411,7 +411,7 @@ flush_trees(#db{} = Db,
                 end,
                 ExternalSize = ?term_size(Summary),
                 {ok, NewSummaryPointer, SummarySize} =
-                    Engine:write_summary(EngineState, Summary),
+                    Engine:write_doc_summary(EngineState, Summary),
                 Leaf = #leaf{
                     deleted = IsDeleted,
                     ptr = NewSummaryPointer,

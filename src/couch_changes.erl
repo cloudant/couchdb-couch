@@ -464,7 +464,10 @@ send_changes(Acc, Dir, FirstRound) ->
                 {#mrview{}, {fast_view, _, _, _}} ->
                     couch_mrview:view_changes_since(View, StartSeq, DbEnumFun, [{dir, Dir}], Acc);
                 {undefined, _} ->
-                    couch_db:changes_since(Db, StartSeq, DbEnumFun, [{dir, Dir}], Acc);
+                    couch_db:fold_changes(Db, StartSeq, DbEnumFun, Acc, [
+                            doc_info,
+                            {dir, Dir}
+                        ]);
                 {#mrview{}, _} ->
                     ViewEnumFun = fun view_changes_enumerator/2,
                     {Go, Acc0} = couch_mrview:view_changes_since(View, StartSeq, ViewEnumFun, [{dir, Dir}], Acc),
@@ -573,7 +576,7 @@ keep_sending_changes(Args, Acc0, FirstRound) ->
     true ->
         case wait_updated(Timeout, TimeoutFun, UserAcc2) of
         {updated, UserAcc4} ->
-            DbOptions1 = [{user_ctx, couch_db:info(Db, user_ctx)} | DbOptions],
+            DbOptions1 = [{user_ctx, couch_db:get_user_ctx(Db)} | DbOptions],
             case couch_db:open(couch_db:name(Db), DbOptions1) of
             {ok, Db2} ->
                 keep_sending_changes(

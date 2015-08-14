@@ -33,6 +33,7 @@
 -export([find_in_binary/2]).
 -export([callback_exists/3, validate_callback_exists/3]).
 -export([with_proc/4]).
+-export([check_md5/2]).
 
 -include_lib("couch/include/couch_db.hrl").
 
@@ -563,6 +564,12 @@ validate_callback_exists(Module, Function, Arity) ->
         throw({error,
             {undefined_callback, CallbackStr, {Module, Function, Arity}}})
     end.
+
+
+check_md5(_NewSig, <<>>) -> ok;
+check_md5(Sig, Sig) -> ok;
+check_md5(_, _) -> throw(md5_mismatch).
+
 
 ensure_loaded(Module) when is_atom(Module) ->
     case code:ensure_loaded(Module) of

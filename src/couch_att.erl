@@ -547,7 +547,7 @@ flush_data(Db, {stream, StreamEngine}, Att) ->
             end),
             InMd5 = fetch(md5, Att),
             OutMd5 = fetch(md5, NewAtt),
-            couch_util:check_md5(InMd5, OutMd5),
+            couch_util:check_md5(OutMd5, InMd5),
             NewAtt
     end.
 

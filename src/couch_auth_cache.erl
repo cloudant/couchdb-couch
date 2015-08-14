@@ -329,9 +329,11 @@ refresh_entries(AuthDb) ->
     nil ->
         ok;
     AuthDb2 ->
-        case couch_db:update_seq(AuthDb2) > couch_db:update_seq(AuthDb) of
+        OldSeq = couch_db:get_update_seq(AuthDb),
+        NewSeq = couch_db:get_update_seq(AuthDb2),
+        case NewSeq > OldSeq of
         true ->
-            Options = [{start_key, couch_db:update_seq(AuthDb)}],
+            Options = [{start_key, OldSeq}],
             Fun = fun(DocInfo, _, _) -> refresh_entry(AuthDb2, DocInfo) end,
             {ok, _} = couch_db:fold_changes(AuthDb2, Options, Fun, nil),
             true = ets:insert(?STATE, {auth_db, AuthDb2});
@@ -389,7 +391,9 @@ cache_needs_refresh() ->
             nil ->
                 false;
             AuthDb2 ->
-                couch_db:update_seq(AuthDb2) > couch_db:update_seq(AuthDb)
+                OldSeq = couch_db:get_update_seq(AuthDb),
+                NewSeq = couch_db:get_update_seq(AuthDb2),
+                NewSeq > OldSeq
             end
         end,
         false

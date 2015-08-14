@@ -211,7 +211,7 @@ copy_docs(St, #st{} = NewSt, MixedInfos, Retry) ->
                     },
                     atts = AttSizes
                 },
-                {NewLeaf, couch_bt_engine:add_sizes(leaf, NewLeaf, SizesAcc)};
+                {NewLeaf, couch_db_updater:add_sizes(leaf, NewLeaf, SizesAcc)};
             (_Rev, _Leaf, branch, SizesAcc) ->
                 {?REV_MISSING, SizesAcc}
         end, {0, 0, []}, Info#full_doc_info.rev_tree),

@@ -18,8 +18,9 @@
 -export([is_idle/1,monitor/1]).
 -export([update_doc/3,update_doc/4,update_docs/4,update_docs/2,update_docs/3,delete_doc/3]).
 -export([get_doc_info/2,get_full_doc_info/2,get_full_doc_infos/2]).
--export([open_doc/2,open_doc/3,open_doc_revs/4]).
+-export([open_doc/2,open_doc/3,open_doc_revs/4, open_docs/2, open_docs/3]).
 -export([set_revs_limit/2,get_revs_limit/1]).
+-export([get_user_ctx/1]).
 -export([get_missing_revs/2,name/1,get_update_seq/1,get_committed_update_seq/1]).
 -export([get_uuid/1, get_epochs/1, get_compacted_seq/1]).
 -export([get_purge_seq/1,purge_docs/2,get_last_purged/1]).
@@ -31,12 +32,13 @@
 -export([check_is_admin/1, is_admin/1, check_is_member/1, get_doc_count/1]).
 -export([reopen/1, is_system_db/1, compression/1, make_doc/5]).
 -export([load_validation_funs/1]).
--export([check_md5/2, with_stream/3]).
+-export([with_stream/3]).
 -export([monitored_by/1]).
 -export([normalize_dbname/1]).
 -export([validate_dbname/1]).
 
 
+-export([is_db/1]).
 -export([open_write_stream/2, open_read_stream/2, is_active_stream/2]).
 -export([fold_changes_fun/2]).
 
@@ -68,19 +70,32 @@ open_int(DbName, Options) ->
 
 % this should be called anytime an http request opens the database.
 % it ensures that the http userCtx is a valid reader
+open(DbName, Options) when is_binary(DbName) ->
+    case proplists:get_value(clustered, Options) of
+        true ->
+            Ctx = proplists:get_value(user_ctx, Options),
+            {ok, #cdb{
+                name=DbName,
+                user_ctx=Ctx
+            }};
+        _ ->
+            case couch_server:open(DbName, Options) of
+                {ok, Db} ->
+                    try
+                        check_is_member(Db),
+                        {ok, Db}
+                    catch
+                        throw:Error ->
+                            close(Db),
+                            throw(Error)
+                end;
+            Else ->
+                Else
+        end
+    end;
 open(DbName, Options) ->
-    case couch_server:open(DbName, Options) of
-        {ok, Db} ->
-            try
-                check_is_member(Db),
-                {ok, Db}
-            catch
-                throw:Error ->
-                    close(Db),
-                    throw(Error)
-            end;
-        Else -> Else
-    end.
+    open(iolist_to_binary(DbName), Options).
+
 
 reopen(#db{} = Db) ->
     % We could have just swapped out the storage engine
@@ -91,6 +106,12 @@ reopen(#db{} = Db) ->
     } = Db,
     ok = Engine:close(EngineState),
     open(Db#db.name, [{user_ctx, Db#db.user_ctx} | Db#db.options]).
+
+
+is_db(#cdb{}) -> true;
+is_db(#db{}) -> true;
+is_db(_Else) -> false.
+
 
 is_system_db(#db{options = Options}) ->
     lists:member(sys_db, Options).
@@ -182,6 +203,12 @@ open_doc(Db, Id, Options) ->
     Else ->
         apply_open_options(Else,Options)
     end.
+
+open_docs(Db, Id) ->
+    open_docs(Db, Id, []).
+
+open_docs(Db, Id, Options) ->
+    
 
 apply_open_options({ok, Doc},Options) ->
     apply_open_options2(Doc,Options);
@@ -282,6 +309,9 @@ purge_docs(#db{main_pid=Pid}, IdsRevs) ->
 
 get_committed_update_seq(#db{committed_update_seq=Seq}) ->
     Seq.
+
+get_user_ctx(#db{} = Db) ->
+    Db#db.user_ctx.
 
 get_update_seq(#db{} = Db)->
     get_prop(Db, update_seq).
@@ -1062,10 +1092,6 @@ set_new_att_revpos(#doc{revs={RevPos,_Revs},atts=Atts0}=Doc) ->
 doc_flush_atts(Db, Doc) ->
     Doc#doc{atts=[couch_att:flush(Db, Att) || Att <- Doc#doc.atts]}.
 
-check_md5(_NewSig, <<>>) -> ok;
-check_md5(Sig, Sig) -> ok;
-check_md5(_, _) -> throw(md5_mismatch).
-
 
 compressible_att_type(MimeType) when is_binary(MimeType) ->
     compressible_att_type(?b2l(MimeType));
@@ -1123,7 +1149,7 @@ with_stream(Db, Att, Fun) ->
     end,
     {StreamEngine, Len, IdentityLen, Md5, IdentityMd5} =
         couch_stream:close(OutputStream),
-    check_md5(IdentityMd5, ReqMd5),
+    couch_util:check_md5(IdentityMd5, ReqMd5),
     {AttLen, DiskLen, NewEnc} = case Enc of
     identity ->
         case {Md5, IdentityMd5} of

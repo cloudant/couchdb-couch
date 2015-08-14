@@ -57,7 +57,7 @@ seek({Fd, [Pos | Rest]}, Offset) when is_integer(Pos) ->
     
 
 write({Fd, Written}, Data) when is_pid(Fd) ->
-    {ok, Pos, _} = couch_file:append_binary(Data),
+    {ok, Pos, _} = couch_file:append_binary(Fd, Data),
     {ok, {Fd, [{Pos, iolist_size(Written)} | Written]}}.
 
 

@@ -11,6 +11,14 @@
 % the License.
 
 
+% A clustered database
+-record(cdb, {
+    name,
+    user_ctx
+}).
+
+
+% A local database
 -record(db, {
     name,
     filepath,
