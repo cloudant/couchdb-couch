@@ -15,7 +15,7 @@
 -export([open/2,open_int/2,close/1,create/2,get_db_info/1,get_design_docs/1]).
 -export([shutdown/1]).
 -export([incref/1]).
--export([start_compact/1, cancel_compact/1]).
+-export([start_compact/1, start_compact/2, cancel_compact/1]).
 -export([wait_for_compaction/1, wait_for_compaction/2]).
 -export([is_idle/1,monitor/1,pid/1]).
 -export([update_doc/3,update_doc/4,update_docs/4,update_docs/2,update_docs/3,delete_doc/3]).
@@ -172,8 +172,17 @@ monitored_by(Db) ->
 monitor(#db{main_pid=MainPid}) ->
     erlang:monitor(process, MainPid).
 
-start_compact(#db{main_pid=Pid}) ->
-    gen_server:call(Pid, start_compact).
+start_compact(#db{} = Db) ->
+    start_compact(Db, []).
+
+start_compact(#db{} = Db, Opts) ->
+    case lists:keyfind(notify, 1, Opts) of
+        {notify, Pid, Term} ->
+            Db#db.main_pid ! {'$gen_call', {Pid, Term}, start_compact},
+            ok;
+        _ ->
+            gen_server:call(Db#db.main_pid, start_compact)
+    end.
 
 cancel_compact(#db{main_pid=Pid}) ->
     gen_server:call(Pid, cancel_compact).
@@ -676,7 +685,7 @@ load_validation_funs(#db{main_pid=Pid}=Db) ->
     gen_server:cast(Pid, {load_validation_funs, Funs}),
     Funs.
 
-reload_validation_functions(#db{} = Db) ->
+reload_validation_funs(#db{} = Db) ->
     gen_server:cast(Db#db.main_pid, {load_validation_funs, undefined}).
 
 prep_and_validate_update(Db, #doc{id=Id,revs={RevStart, Revs}}=Doc,
