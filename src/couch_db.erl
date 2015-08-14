@@ -13,16 +13,19 @@
 -module(couch_db).
 
 -export([open/2,open_int/2,close/1,create/2,get_db_info/1,get_design_docs/1]).
+-export([shutdown/1]).
+-export([incref/1]).
 -export([start_compact/1, cancel_compact/1]).
 -export([wait_for_compaction/1, wait_for_compaction/2]).
--export([is_idle/1,monitor/1]).
+-export([is_idle/1,monitor/1,pid/1]).
 -export([update_doc/3,update_doc/4,update_docs/4,update_docs/2,update_docs/3,delete_doc/3]).
 -export([get_doc_info/2,get_full_doc_info/2,get_full_doc_infos/2]).
 -export([open_doc/2,open_doc/3,open_doc_revs/4, open_docs/2, open_docs/3]).
 -export([set_revs_limit/2,get_revs_limit/1]).
--export([get_user_ctx/1]).
+-export([get_user_ctx/1, set_user_ctx/2]).
 -export([get_missing_revs/2,name/1,get_update_seq/1,get_committed_update_seq/1]).
 -export([get_uuid/1, get_epochs/1, get_compacted_seq/1]).
+-export([get_instance_start_time/1]).
 -export([get_purge_seq/1,purge_docs/2,get_last_purged/1]).
 -export([start_link/4,open_doc_int/3,ensure_full_commit/1,ensure_full_commit/2]).
 -export([fold_docs/3, fold_docs/4]).
@@ -31,7 +34,7 @@
 -export([changes_since/4,changes_since/5,read_doc/2,new_revid/1]).
 -export([check_is_admin/1, is_admin/1, check_is_member/1, get_doc_count/1]).
 -export([reopen/1, is_system_db/1, compression/1, make_doc/5]).
--export([load_validation_funs/1]).
+-export([load_validation_funs/1, reload_validation_funs/1]).
 -export([with_stream/3]).
 -export([monitored_by/1]).
 -export([normalize_dbname/1]).
@@ -108,9 +111,32 @@ reopen(#db{} = Db) ->
     open(Db#db.name, [{user_ctx, Db#db.user_ctx} | Db#db.options]).
 
 
+% You shouldn't call this. Its part of the ref counting between
+% couch_server and couch_db instances.
+incref(#db{} = Db) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    {ok, NewState} = Engine:incref(EngineState),
+    {ok, #db{engine = {Engine, NewState}}}.
+
+
+close(#db{} = Db) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    ok = Engine:decref(EngineState).
+
+shutdown(#db{} = Db) ->
+    couch_util:shutdown_sync(Db#db.main_pid).
+
 is_db(#cdb{}) -> true;
 is_db(#db{}) -> true;
 is_db(_Else) -> false.
+
+
+pid(#db{} = Db) ->
+    Db#db.main_pid.
 
 
 is_system_db(#db{options = Options}) ->
@@ -124,12 +150,6 @@ ensure_full_commit(Db, RequiredSeq) ->
     #db{main_pid=Pid, instance_start_time=StartTime} = Db,
     ok = gen_server:call(Pid, {full_commit, RequiredSeq}, infinity),
     {ok, StartTime}.
-
-close(#db{} = Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    ok = Engine:close(EngineState).
 
 is_idle(#db{compactor_pid=nil, waiting_delayed_commit=nil} = Db) ->
     monitored_by(Db) == [];
@@ -318,6 +338,9 @@ get_committed_update_seq(#db{committed_update_seq=Seq}) ->
 get_user_ctx(#db{} = Db) ->
     Db#db.user_ctx.
 
+set_user_ctx(#db{} = Db, #user_ctx{} = UserCtx) ->
+    Db#db{user_ctx = UserCtx}.
+
 get_update_seq(#db{} = Db)->
     get_prop(Db, update_seq).
 
@@ -350,6 +373,9 @@ get_epochs(#db{}=Db) ->
 
 get_compacted_seq(#db{}=Db) ->
     get_prop(Db, compacted_seq).
+
+get_instance_start_time(#db{}=Db) ->
+    Db#db.instance_start_time.
 
 get_db_info(Db) ->
     #db{
@@ -649,6 +675,9 @@ load_validation_funs(#db{main_pid=Pid}=Db) ->
     end, DDocs),
     gen_server:cast(Pid, {load_validation_funs, Funs}),
     Funs.
+
+reload_validation_functions(#db{} = Db) ->
+    gen_server:cast(Db#db.main_pid, {load_validation_funs, undefined}).
 
 prep_and_validate_update(Db, #doc{id=Id,revs={RevStart, Revs}}=Doc,
         OldFullDocInfo, LeafRevsDict, AllowConflict) ->

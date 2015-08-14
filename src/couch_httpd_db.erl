@@ -286,7 +286,7 @@ db_req(#httpd{method='POST',path_parts=[_,<<"_ensure_full_commit">>]}=Req, Db) -
         RequiredSeq > CommittedSeq ->
             couch_db:ensure_full_commit(Db);
         true ->
-            {ok, couch_db:info(Db, instance_start_time)}
+            {ok, couch_db:get_instance_start_time(Db)}
         end
     end,
     send_json(Req, 201, {[

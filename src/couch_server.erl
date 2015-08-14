@@ -85,15 +85,15 @@ open(DbName, Options0) ->
     case ets:lookup(couch_dbs, DbName) of
     [#srv_entry{db=Db, lock=Lock}] when Lock =/= locked ->
         update_lru(DbName, Options),
-        couch_db:add_client(Db),
-        couch_db:set(Db, user_ctx, Ctx);
+        {ok, NewDb} = couch_db:incref(Db),
+        couch_db:set_user_ctx(NewDb, Ctx);
     _ ->
         Timeout = couch_util:get_value(timeout, Options, infinity),
         case gen_server:call(couch_server, {open, DbName, Options}, Timeout) of
         {ok, Db} ->
             update_lru(DbName, Options),
-            couch_db:add_client(Db),
-            couch_db:st(Db, user_ctx, Ctx);
+            {ok, NewDb} = couch_db:incref(Db),
+            couch_db:set_user_ctx(NewDb, Ctx);
         Error ->
             Error
         end
@@ -115,8 +115,8 @@ create(DbName, Options0) ->
     case gen_server:call(couch_server, {create, DbName, Options}, infinity) of
     {ok, Db} ->
         Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
-        couch_db:add_client(Db),
-        couch_db:set(Db, user_ctx, Ctx);
+        {ok, NewDb} = couch_db:incref(Db),
+        couch_db:set_user_ctx(NewDb, Ctx);
     Error ->
         Error
     end.
@@ -385,7 +385,7 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
         pid = DbPid,
         lock = unlocked,
         waiters = undefined,
-        start_time = couch_db:info(Db, instance_start_time)
+        start_time = couch_db:get_instance_start_time(Db)
     }),
     true = ets:insert(couch_dbs_pid_to_name, {DbPid, DbName}),
     Lru = case couch_db:is_system_db(Db) of
@@ -511,7 +511,7 @@ handle_call({delete, DbName, Options}, _From, Server) ->
 handle_call({db_updated, Db}, _From, Server0) ->
     true = couch_db:is_idle(Db),
     DbName = couch_db:name(Db),
-    StartTime = couch_db:info(Db, instance_start_time),
+    StartTime = couch_db:get_instance_start_time(Db),
     Server = try ets:lookup(couch_dbs, DbName) of
         [#srv_entry{start_time=StartTime}=SE] ->
             true = ets:insert(couch_dbs, SE#srv_entry{

@@ -201,7 +201,7 @@ json_apply_field({Key, NewValue}, [], Acc) ->
 
 json_user_ctx(Db) ->
     DbName = mem3:dbname(couch_db:name(Db)),
-    Ctx = couch_db:info(Db, user_ctx),
+    Ctx = couch_db:get_user_ctx(Db),
     {[
             {<<"db">>, DbName},
             {<<"name">>, Ctx#user_ctx.name},

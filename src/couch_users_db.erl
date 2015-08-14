@@ -41,7 +41,7 @@
 % Else
 %   -> transform_doc
 before_doc_update(Doc, Db) ->
-    #user_ctx{name=Name} = couch_db:info(Db, user_ctx),
+    #user_ctx{name=Name} = couch_db:get_user_ctx(Db),
     DocName = get_doc_name(Doc),
     case (catch couch_db:check_is_admin(Db)) of
     ok ->
@@ -110,7 +110,7 @@ after_doc_read(#doc{id = <<?DESIGN_DOC_PREFIX, _/binary>>} = Doc, Db) ->
         <<"Only administrators can view design docs in the users database.">>})
     end;
 after_doc_read(Doc, Db) ->
-    #user_ctx{name=Name} = couch_db:info(Db, user_ctx),
+    #user_ctx{name=Name} = couch_db:get_user_ctx(Db),
     DocName = get_doc_name(Doc),
     %% FIXME we bypass this check when COUCHDB-2635 would be resolved
 %%    case (catch couch_db:check_is_admin(Db)) of
