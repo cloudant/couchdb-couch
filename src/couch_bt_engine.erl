@@ -12,6 +12,8 @@
     delete/2,
     delete/3,
 
+    delete_compaction_files/2,
+
     sync/1,
     commit_data/1,
 
@@ -128,12 +130,16 @@ delete(RootDir, FilePath, Async) ->
     %% Delete any leftover compaction files. If we don't do this a
     %% subsequent request for this DB will try to open them to use
     %% as a recovery.
-    lists:foreach(fun(Ext) ->
-        couch_file:delete(RootDir, FilePath ++ Ext)
-    end, [".compact", ".compact.data", ".compact.meta"]),
+    delete_compaction_files(RootDir, FilePath),
 
     % Delete the actual database file
     couch_file:delete(RootDir, FilePath, Async).
+
+
+delete_compaction_files(RootDir, FilePath) ->
+    lists:foreach(fun(Ext) ->
+        couch_file:delete(RootDir, FilePath ++ Ext)
+    end, [".compact", ".compact.data", ".compact.meta"]).
 
 
 sync(#st{fd = Fd}) ->
@@ -589,12 +595,6 @@ update_header(St, Header) ->
 delete_compaction_files(FilePath) ->
     RootDir = config:get("couchdb", "database_dir", "."),
     delete_compaction_files(RootDir, FilePath).
-
-
-delete_compaction_files(RootDir, FilePath) ->
-    lists:foreach(fun(Ext) ->
-        couch_file:delete(RootDir, FilePath ++ Ext)
-    end, [".compact", ".compact.data", ".compact.meta"]).
 
 
 rev_tree(DiskTree) ->

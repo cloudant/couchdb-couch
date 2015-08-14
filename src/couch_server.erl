@@ -21,6 +21,7 @@
 -export([handle_cast/2,code_change/3,handle_info/2,terminate/2]).
 -export([dev_start/0,is_admin/2,has_admins/0,get_stats/0]).
 -export([close_lru/0]).
+-export([delete_compaction_files/1]).
 
 % config_listener api
 -export([handle_config_change/5, handle_config_terminate/3]).
@@ -125,11 +126,15 @@ delete(DbName, Options) when is_list(DbName) ->
 delete(DbName, Options) ->
     gen_server:call(couch_server, {delete, DbName, Options}, infinity).
 
-
-clear_compaction_data(DbName) ->
-    % Run Engine:clear_compaction_data(FilePath) for
-    % all configured engines here.
-    ok.
+delete_compaction_files(DbName) when is_list(DbName) ->
+    RootDir = config:get("couchdb", "database_dir", "."),
+    lists:foreach(fun({Ext, Module}) ->
+        FilePath = make_filepath(RootDir, DbName, Ext),
+        Module:clear_compaction_data(FilePath)
+    end, get_configured_engines()),
+    ok;
+delete_compaction_files(DbName) when is_binary(DbName) ->
+    delete_compaction_files(?b2l(DbName)).
 
 maybe_add_sys_db_callbacks(DbName, Options) when is_binary(DbName) ->
     maybe_add_sys_db_callbacks(?b2l(DbName), Options);
@@ -489,6 +494,7 @@ handle_call({delete, DbName, Options}, _From, Server) ->
 
         {Module, Filepath} = get_engine(Server, DbNameList),
         Async = not lists:member(sync, Options),
+        delete_compaction_files(RootDir, FilePath),
 
         case Module:delete(Server#server.root_dir, FilePath, Async) of
         ok ->
@@ -632,7 +638,7 @@ get_engine(Server, DbName) ->
         engines = Engines
     } = Server,
     Possible = lists:foldl(fun({Extension, Module}, Acc) ->
-        Path = make_filename(RootDir, DbName, Extension),
+        Path = make_filepath(RootDir, DbName, Extension),
         case Module:exists(Path) of
             true ->
                 [{Module, Path} | Acc];
@@ -655,12 +661,12 @@ get_default_engine(Server, DbName) ->
         root_dir = RootDir,
         engines = Engines
     } = Server,
-    Default = {couch_bt_engine, make_filename(RootDir, DbName, "couch")},
+    Default = {couch_bt_engine, make_filepath(RootDir, DbName, "couch")},
     case config:get("couchdb", "default_engine") of
         Extension when is_list(Extension) ->
             case lists:keysearch(Extension, 1, Engines) of
                 {Extension, Module} ->
-                    {Module, make_filename(RootDir, DbName, Extension)};
+                    {Module, make_filepath(RootDir, DbName, Extension)};
                 false ->
                     Default
             end;
@@ -669,5 +675,5 @@ get_default_engine(Server, DbName) ->
     end.
 
 
-make_filename(RootDir, DbName, Extension) ->
+make_filepath(RootDir, DbName, Extension) ->
     filename:join([RootDir, "./" ++ DbName ++ "." ++ Extension]).

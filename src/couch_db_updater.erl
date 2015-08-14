@@ -69,7 +69,7 @@ handle_call(cancel_compact, _From, #db{compactor_pid = nil} = Db) ->
 handle_call(cancel_compact, _From, #db{compactor_pid = Pid} = Db) ->
     unlink(Pid),
     exit(Pid, kill),
-    couch_server:clear_compaction_data(Db#db.name),
+    couch_server:delete_compaction_files(Db#db.name),
     Db2 = Db#db{compactor_pid = nil},
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
     {reply, ok, Db2};

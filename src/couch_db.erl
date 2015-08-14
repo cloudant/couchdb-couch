@@ -207,8 +207,13 @@ open_doc(Db, Id, Options) ->
 open_docs(Db, Id) ->
     open_docs(Db, Id, []).
 
-open_docs(Db, Id, Options) ->
-    
+open_docs(Db, Ids, _Options) ->
+    % TODO: Add support for returning other
+    % types of docs beyond #full_doc_info{}
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:open_docs(EngineState, Ids).
 
 apply_open_options({ok, Doc},Options) ->
     apply_open_options2(Doc,Options);
