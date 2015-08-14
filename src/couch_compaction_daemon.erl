@@ -232,16 +232,16 @@ maybe_compact_views(DbName, [DDocName | Rest], Config) ->
 
 
 db_ddoc_names(Db) ->
-    {ok, _, DDocNames} = couch_db:enum_docs(
-        Db,
-        fun(#full_doc_info{id = <<"_design/", _/binary>>, deleted = true}, _, Acc) ->
-            {ok, Acc};
-        (#full_doc_info{id = <<"_design/", Id/binary>>}, _, Acc) ->
-            {ok, [Id | Acc]};
-        (_, _, Acc) ->
-            {stop, Acc}
-        end, [], [{start_key, <<"_design/">>}, {end_key_gt, <<"_design0">>}]),
+    FoldFun = fun ddoc_name/2,
+    {ok, DDocNames} = couch_db:fold_docs(Db, FoldFun, []),
     DDocNames.
+
+ddoc_name(#full_doc_info{id = <<"_design", _/binary>>, deleted = true}, Acc) ->
+    {ok, Acc};
+ddoc_name(#full_doc_info{id = <<"_design", Id/binary>>}, Acc) ->
+    {ok, [Id | Acc]};
+ddoc_name(_, Acc) ->
+    {stop, Acc}.
 
 
 maybe_compact_view(DbName, GroupId, Config) ->
