@@ -464,10 +464,8 @@ send_changes(Acc, Dir, FirstRound) ->
                 {#mrview{}, {fast_view, _, _, _}} ->
                     couch_mrview:view_changes_since(View, StartSeq, DbEnumFun, [{dir, Dir}], Acc);
                 {undefined, _} ->
-                    couch_db:fold_changes(Db, StartSeq, DbEnumFun, Acc, [
-                            doc_info,
-                            {dir, Dir}
-                        ]);
+                    Opts = [doc_info, {dir, Dir}],
+                    couch_db:fold_changes(Db, StartSeq, DbEnumFun, Acc, Opts);
                 {#mrview{}, _} ->
                     ViewEnumFun = fun view_changes_enumerator/2,
                     {Go, Acc0} = couch_mrview:view_changes_since(View, StartSeq, ViewEnumFun, [{dir, Dir}], Acc),

@@ -43,7 +43,6 @@
 
 -export([is_db/1]).
 -export([open_write_stream/2, open_read_stream/2, is_active_stream/2]).
--export([fold_changes_fun/2]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_db_int.hrl").
@@ -1247,11 +1246,33 @@ fold_docs(Db, Fun, Acc) ->
     fold_docs(Db, Fun, Acc, []).
 
 
-fold_docs(Db, Fun, Acc, Options) ->
+fold_docs(Db, UserFun, UserAcc, Options) ->
+    case lists:keyfind(namespace, 1, Options) of
+        {namespace, <<"_design">>} ->
+            fold_design_docs(Db, UserFun, UserAcc, Options);
+        {namespace, <<"_local">>} ->
+            fold_local_docs(Db, UserFun, UserAcc, Options);
+        _ ->
+            fold_all_docs(Db, UserFun, UserAcc, Options)
+    end.
+
+
+fold_changes(Db, StartSeq, Fun, Acc) ->
+    fold_changes(Db, StartSeq, Fun, Acc, []).
+
+
+fold_changes(Db, StartSeq, UserFun, UserAcc, Opts) ->
     #db{
         engine = {Engine, EngineState}
     } = Db,
-    Engine:fold_docs(EngineState, Fun, Acc, Options).
+    Fun = fun conv_fold_fun/2,
+    ConvChain = lists:flatten([
+        get_doc_type_conv(Db, Options)
+    ]),
+    Acc1 = {UserFun, UserAcc, ConvChain},
+    {ok, Acc2} = Engine:fold_changes(EngineState, StartSeq, Fun, Acc1, Opts),
+    {UserFun, FinalUserAcc, _} = Acc2,
+    {ok, FinalUserAcc}.
 
 
 count_changes_since(Db, SinceSeq) ->
@@ -1261,32 +1282,33 @@ count_changes_since(Db, SinceSeq) ->
     Engine:count_changes_since(EngineState, SinceSeq).
 
 
-fold_changes(Db, StartSeq, Fun, Acc) ->
-    fold_changes(Db, StartSeq, Fun, Acc, []).
+%%% Internal function %%%
 
-
-fold_changes(Db, StartSeq, UserFun, UserAcc, Options) ->
+fold_all_docs(St, UserFun, UserAcc, Options) ->
     #db{
         engine = {Engine, EngineState}
     } = Db,
-    FoldFun = fun ?MODULE:fold_changes_fun/2,
-    % Might want to grab a conversion function based
-    % on options here.
-    FoldAcc = {Options, UserFun, UserAcc},
-    {ok, Acc} = Engine:fold_changes(EngineState, StartSeq, FoldFun, FoldAcc),
-    {_, _, FinalUserAcc} = Acc,
-    {ok, FinalUserAcc}.
+
+    % FIXME: THIS IS A HUGE HACK
+    % We'll have to figure out a different implementation
+    % for the _all_docs handler which is the only thing that
+    % uses include_reductions.
+    case lists:member(include_reductions, Options) of
+        true ->
+            Engine:fold_docs(EngineState, UserFun, UserAcc, Options);
+        false ->
+            Fun = fun conv_fold_fun/2,
+            ConvChain = lists:flatten([
+                get_doc_type_conv(Db, Options)
+            ]),
+            Acc1 = {UserFun, UserAcc, ConvChain},
+            {ok, Acc2} = Engine:fold_docs(EngineState, Fun, Acc1, Options),
+            {UserFun, FinalUserAcc, _} = Acc2,
+            {ok, FinalUserAcc}
+    end.
+    
 
 
-fold_changes_fun(#full_doc_info{} = FDI, {Options, UserFun, UserAcc}) ->
-    %Doc = convert(FDI, Options),
-    % THIS WILL BREAK:
-    Doc = FDI,
-    {Go, NewUserAcc} = UserFun(Doc, UserAcc),
-    {Go, {Options, UserFun, NewUserAcc}}.
-
-
-%%% Internal function %%%
 open_doc_revs_int(Db, IdRevs, Options) ->
     Ids = [Id || {Id, _Revs} <- IdRevs],
     LookupResults = get_full_doc_infos(Db, Ids),
@@ -1491,3 +1513,44 @@ get_prop(Db, Key, Default) ->
         engine = {Engine, EngineState}
     } = Db,
     Engine:get(EngineState, Key, Default).
+
+
+conv_fold_fun(Value, {UserFun, UserAcc, Conv}) ->
+    {NewValue, NewConv} = apply_conversions(Value, Conv)
+    {Go, NewUserAcc} = UserFun(NewValue, UserAcc),
+    {Go, {UserFun, NewUserAcc, NewConv}}.
+
+
+apply_conversions(Value, []) ->
+    {Value, []};
+apply_conversions(Value, [{Fun, St} | Rest]) ->
+    case Fun(Value, St) of
+        {ok, NewValue, NewSt} ->
+            [{Fun, NewSt} | apply_conversions(NewValue, Rest)];
+        {skip, NewSt} ->
+            [{Fun, NewSt} | Rest]
+    end.
+
+
+get_doc_type_conv(Db, Options) ->
+    lists:foldl(fun(Opt, Acc) ->
+        case Opt of
+            doc -> {fun conv_to_doc/2, Db};
+            doc_info -> {fun conv_to_doc_info/2, undefined};
+            full_doc_info -> [];
+            _ -> Acc
+        end
+    end, [], Options).
+
+
+conv_to_doc(#full_doc_info{}=FDI, Db) ->
+    #doc_info{
+        revs = [#rev_info{deleted = IsDeleted, rev = Rev, body_sp = Bp} | _]
+    } = DocInfo = couch_doc:to_doc_info(FullDocInfo),
+    {[{_, RevPath}], []} = couch_key_tree:get(RevTree, [Rev]),
+    Doc = make_doc(Db, Id, IsDeleted, Bp, RevPath),
+    {ok, Doc, Db}.
+
+
+conv_to_doc_info(#full_doc_info{} = FDI, Acc) ->
+    {ok, couch_doc:to_doc_info(FDI), Acc}.

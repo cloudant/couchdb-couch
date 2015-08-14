@@ -40,6 +40,7 @@
     get_size_info/1,
 
     fold_docs/4,
+    fold_local_docs/4,
     fold_changes/5,
     count_changes_since/2,
 
@@ -346,14 +347,47 @@ get_size_info(#st{} = St) ->
 
 
 fold_docs(St, UserFun, UserAcc, Options) ->
-    ok.
+    Fun = fun skip_deleted/4,
+    RedFun = case lists:member(include_reductions, Options) of
+        true -> fun include_reductions/4;
+        false -> fun drop_reductions/4
+    end,
+    InAcc = {RedFun, {UserFun, UserAcc}},
+    {ok, Red, OutAcc} = couch_btree:fold(St#st.id_tree, Fun, InAcc, Opts),
+    {_, {_, FinalUserAcc}} = OutAcc,
+    case lists:member(include_reductions, Options) of
+        true ->
+            {ok, Red, FinalUserAcc};
+        false ->
+            {ok, FinalUserAcc}
+    end.
+
+
+fold_local_docs(St, UserFun, UserAcc, Options) ->
+    Fun = fun skip_deleted/4,
+    InAcc = {UserFun, UserAcc},
+    {ok, _, OutAcc} = couch_btree:fold(St#st.local_tree, Fun, InAcc, Options),
+    {_, FinalUserAcc} = OutAcc,
+    {ok, OutAcc}.
+
 
 fold_changes(St, SinceSeq, UserFun, UserAcc, Options) ->
-    ok.
+    Fun = fun drop_reductions/4,
+    InAcc = {UserFun, UserAcc},
+    Opts = [{start_key, StartSeq + 1}] ++ Options,
+    {ok, _, OutAcc} = couch_btree:fold(SeqTree, Fun, InAcc, Opts),
+    {_, FinalUserAcc} = OutAcc,
+    {ok, FinalUserAcc}.
 
 
 count_changes_since(St, SinceSeq) ->
-    ok.
+    BTree = St#st.seq_tree,
+    FoldFun = fun(_SeqStart, PartialReds, 0) ->
+        {ok, couch_btree:final_reduce(BTree, PartialReds)}
+    end,
+    Opts = [{start_key, SinceSeq + 1}],
+    {ok, Changes} = couch_btree:fold_reduce(BTree, FoldFun, 0, Opts),
+    Changes.
 
 
 start_compaction(St, DbName, Options, Parent) ->
@@ -684,68 +718,27 @@ active_size(#st{} = St, #size_info{} = SI) ->
     end, SI#size_info.active, Trees).
 
 
-skip_deleted(traverse, LK, {Undeleted, _, _} = Reds, Acc) when Undeleted == 0 ->
-    {skip, LK, Reds, Acc};
-skip_deleted(Case, A, B, C) ->
-    {Case, A, B, C}.
+% First element of the reductions is the total
+% number of undeleted documents.
+skip_deleted(traverse, Entry, {0, _, _} = Reds, Acc) ->
+    {skip, Acc};
+skip_deleted(Case, Entry, Reds, {UserFun, UserAcc}) ->
+    {Go, NewUseAcc} = UserFun(Case, Entry, Reds, UserAcc),
+    {Go, {UserFun, NewUserAcc}}.
+    
 
-stop_on_leaving_namespace(NS) ->
-    fun
-        (visit, #full_doc_info{id = Key} = FullInfo, Reds, Acc) ->
-            case has_prefix(Key, NS) of
-                true ->
-                    {visit, FullInfo, Reds, Acc};
-                false ->
-                    {stop, FullInfo, Reds, Acc}
-            end;
-        (Case, KV, Reds, Acc) ->
-            {Case, KV, Reds, Acc}
-    end.
+include_reductions(visit, FDI, _Reds, {UserFun, UserAcc}) ->
+    {Go, NewUserAcc} = UserFun(FDI, Reds, UserAcc),
+    {Go, {UserFun, NewUserAcc}};
+include_reductions(_, _, _, Acc) ->
+    {ok, Acc}.
 
-has_prefix(Bin, Prefix) ->
-    S = byte_size(Prefix),
-    case Bin of
-        <<Prefix:S/binary, "/", _/binary>> ->
-            true;
-        _Else ->
-            false
-    end.
 
-pipe(Filters, Final) ->
-    Wrap =
-        fun
-            (visit, KV, Reds, Acc) ->
-                Final(KV, Reds, Acc);
-            (skip, _KV, _Reds, Acc) ->
-                {skip, Acc};
-            (stop, _KV, _Reds, Acc) ->
-                {stop, Acc};
-            (traverse, _, _, Acc) ->
-                {ok, Acc}
-        end,
-    do_pipe(Filters, Wrap).
+drop_reductions(visit, FDI, _Reds, {UserFun, UserAcc}) ->
+    {Go, NewUserAcc} = UserFun(FDI, UserAcc),
+    {Go, {UserFun, NewUserAcc}};
+drop_reductions(_, _, _, Acc) ->
+    {ok, Acc}.
 
-do_pipe([], Fun) -> Fun;
-do_pipe([Filter|Rest], F0) ->
-    F1 = fun(C0, KV0, Reds0, Acc0) ->
-        {C, KV, Reds, Acc} = Filter(C0, KV0, Reds0, Acc0),
-        F0(C, KV, Reds, Acc)
-    end,
-    do_pipe(Rest, F1).
 
-set_namespace_range(Options, undefined) -> Options;
-set_namespace_range(Options, NS) ->
-    %% FIXME depending on order we might need to swap keys
-    SK = select_gt(
-           proplists:get_value(start_key, Options, <<"">>),
-           <<NS/binary, "/">>),
-    EK = select_lt(
-           proplists:get_value(end_key, Options, <<NS/binary, "0">>),
-           <<NS/binary, "0">>),
-    [{start_key, SK}, {end_key_gt, EK}].
 
-select_gt(V1, V2) when V1 < V2 -> V2;
-select_gt(V1, _V2) -> V1.
-
-select_lt(V1, V2) when V1 > V2 -> V2;
-select_lt(V1, _V2) -> V1.
