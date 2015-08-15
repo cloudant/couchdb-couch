@@ -124,15 +124,16 @@ incref(St) ->
 
 
 decref(St) ->
-    erlang:demonitor(St#st.fd_monitor, [flush]).
+    true = erlang:demonitor(St#st.fd_monitor, [flush]),
+    ok.
 
 
 monitored_by(St) ->
     case erlang:process_info(St#st.fd, monitored_by) of
-        undefined ->
-            [];
-        Else ->
-            Else
+        {monitored_by, Pids} ->
+            Pids;
+        _ ->
+            []
     end.
 
 

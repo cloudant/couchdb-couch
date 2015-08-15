@@ -509,7 +509,7 @@ handle_call({delete, DbName, Options}, _From, Server) ->
         {reply, Error, Server}
     end;
 handle_call({db_updated, Db}, _From, Server0) ->
-    true = couch_db:is_idle(Db),
+    true = couch_db:is_db(Db),
     DbName = couch_db:name(Db),
     StartTime = couch_db:get_instance_start_time(Db),
     Server = try ets:lookup(couch_dbs, DbName) of
