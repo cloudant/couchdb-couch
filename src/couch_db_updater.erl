@@ -23,9 +23,10 @@
 
 
 init({Engine, DbName, FilePath, Options}) ->
+    couch_log:error("STARTING DB: ~s", [DbName]),
     erlang:put(io_priority, {db_update, DbName}),
     try
-        Db = case Engine:init(DbName, FilePath, Options) of
+        Db = case Engine:init(FilePath, Options) of
             {ok, EngineState} ->
                 init_db(DbName, Engine, EngineState, Options);
             Error ->
@@ -35,7 +36,9 @@ init({Engine, DbName, FilePath, Options}) ->
         % we don't load validation funs here because the fabric query is liable to
         % race conditions.  Instead see couch_db:validate_doc_update, which loads
         % them lazily
-        proc_lib:init_ack({ok, Db#db{main_pid = self()}})
+        NewDb = Db#db{main_pid = self()},
+        proc_lib:init_ack({ok, NewDb}),
+        gen_server:enter_loop(?MODULE, [], NewDb)
     catch
         throw:InitError ->
             proc_lib:init_ack(InitError)
@@ -43,6 +46,7 @@ init({Engine, DbName, FilePath, Options}) ->
 
 
 terminate(Reason, Db) ->
+    couch_log:error("STOPPING DB: ~s", [Db#db.name]),
     couch_util:shutdown_sync(Db#db.compactor_pid),
     {Engine, EngineState} = Db#db.engine,
     Engine:terminate(Reason, EngineState),
@@ -734,7 +738,7 @@ finish_engine_compaction(OldDb, CompactFilePath) ->
             couch_log:info("Compaction for db \"~s\" completed.", Arg),
             NewDb2;
         false ->
-            ok = Engine:close(NewState1),
+            ok = Engine:decref(NewState1),
             NewDb = OldDb#db{
                 compactor_pid = Engine:start_compaction(
                         OldState, OldDb#db.name, OldDb#db.options, self())

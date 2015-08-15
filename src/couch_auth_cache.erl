@@ -452,6 +452,7 @@ ensure_users_db_exists(DbName, Options) ->
         ensure_auth_ddoc_exists(Db, <<"_design/_auth">>),
         {ok, Db};
     _Error ->
+        couch_log:error("~nERROR: ~p~n~n", [_Error]),
         {ok, Db} = couch_db:create(DbName, Options1),
         ok = ensure_auth_ddoc_exists(Db, <<"_design/_auth">>),
         {ok, Db}

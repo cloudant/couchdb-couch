@@ -54,13 +54,7 @@
 
 start_link(Engine, DbName, Filepath, Options) ->
     Arg = {Engine, DbName, Filepath, Options},
-    case proc_lib:start_link(couch_db_updater, init, Arg) of
-        {ok, Pid} ->
-            gen_server:call(Pid, get_db);
-        Else ->
-            Else
-    end.
-
+    proc_lib:start_link(couch_db_updater, init, [Arg]).
 
 create(DbName, Options) ->
     couch_server:create(DbName, Options).
@@ -106,7 +100,7 @@ reopen(#db{} = Db) ->
     #db{
         engine = {Engine, EngineState}
     } = Db,
-    ok = Engine:close(EngineState),
+    ok = Engine:decref(EngineState),
     open(Db#db.name, [{user_ctx, Db#db.user_ctx} | Db#db.options]).
 
 
@@ -117,7 +111,7 @@ incref(#db{} = Db) ->
         engine = {Engine, EngineState}
     } = Db,
     {ok, NewState} = Engine:incref(EngineState),
-    {ok, #db{engine = {Engine, NewState}}}.
+    {ok, Db#db{engine = {Engine, NewState}}}.
 
 
 close(#db{} = Db) ->
@@ -347,7 +341,7 @@ get_user_ctx(#db{} = Db) ->
     Db#db.user_ctx.
 
 set_user_ctx(#db{} = Db, #user_ctx{} = UserCtx) ->
-    Db#db{user_ctx = UserCtx}.
+    {ok, Db#db{user_ctx = UserCtx}}.
 
 get_update_seq(#db{} = Db)->
     get_prop(Db, update_seq).
@@ -430,10 +424,10 @@ get_design_docs(#db{name = <<"shards/", _:18/binary, DbName/binary>>}) ->
         Response
     end;
 get_design_docs(#db{} = Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:get_design_docs(EngineState).
+    FoldFun = fun(FDI, Acc) -> {ok, [FDI | Acc]} end,
+    {ok, Docs} = fold_design_docs(Db, FoldFun, [], []),
+    {ok, lists:reverse(Docs)}.
+
 
 check_is_admin(#db{} = Db) ->
     case is_admin(Db) of
@@ -1265,13 +1259,10 @@ fold_changes(Db, StartSeq, UserFun, UserAcc, Opts) ->
     #db{
         engine = {Engine, EngineState}
     } = Db,
-    Fun = fun conv_fold_fun/2,
-    ConvChain = lists:flatten([
-        get_doc_type_conv(Db, Options)
-    ]),
-    Acc1 = {UserFun, UserAcc, ConvChain},
+    Fun = get_doc_type_conv(Opts),
+    Acc1 = {Db, UserFun, UserAcc},
     {ok, Acc2} = Engine:fold_changes(EngineState, StartSeq, Fun, Acc1, Opts),
-    {UserFun, FinalUserAcc, _} = Acc2,
+    {_, _, FinalUserAcc} = Acc2,
     {ok, FinalUserAcc}.
 
 
@@ -1284,7 +1275,7 @@ count_changes_since(Db, SinceSeq) ->
 
 %%% Internal function %%%
 
-fold_all_docs(St, UserFun, UserAcc, Options) ->
+fold_all_docs(Db, UserFun, UserAcc, Options) ->
     #db{
         engine = {Engine, EngineState}
     } = Db,
@@ -1297,16 +1288,36 @@ fold_all_docs(St, UserFun, UserAcc, Options) ->
         true ->
             Engine:fold_docs(EngineState, UserFun, UserAcc, Options);
         false ->
-            Fun = fun conv_fold_fun/2,
-            ConvChain = lists:flatten([
-                get_doc_type_conv(Db, Options)
-            ]),
-            Acc1 = {UserFun, UserAcc, ConvChain},
+            Fun = get_doc_type_conv(Options),
+            Acc1 = {Db, UserFun, UserAcc},
             {ok, Acc2} = Engine:fold_docs(EngineState, Fun, Acc1, Options),
-            {UserFun, FinalUserAcc, _} = Acc2,
+            {_, _, FinalUserAcc} = Acc2,
             {ok, FinalUserAcc}
     end.
-    
+
+
+fold_design_docs(Db, UserFun, UserAcc, Options1) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Fun1 = get_doc_type_conv(Options1),
+    Fun2 = fun only_ddoc_fold/2,
+    Acc1 = {Fun1, {Db, UserFun, UserAcc}},
+    Options2 = set_design_doc_keys(Options1),
+    {ok, Acc2} = Engine:fold_docs(EngineState, Fun2, Acc1, Options2),
+    {_, {_, _, FinalUserAcc}} = Acc2,
+    {ok, FinalUserAcc}.
+
+
+fold_local_docs(Db, UserFun, UserAcc, Options) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Fun = get_doc_type_conv(Options),
+    Acc1 = {Fun, {Db, UserFun, UserAcc}},
+    {ok, Acc2} = Engine:fold_local_docs(EngineState, Fun, Acc1, Options),
+    {_, {_, _, FinalUserAcc}} = Acc2,
+    {ok, FinalUserAcc}.
 
 
 open_doc_revs_int(Db, IdRevs, Options) ->
@@ -1372,7 +1383,7 @@ open_doc_int(Db, #full_doc_info{id=Id,rev_tree=RevTree}=FullDocInfo, Options) ->
         {ok, Doc#doc{meta=doc_meta_info(DocInfo, RevTree, Options)}}, Options);
 open_doc_int(Db, Id, Options) ->
     case get_full_doc_info(Db, Id) of
-    {ok, FullDocInfo} ->
+    #full_doc_info{} = FullDocInfo ->
         open_doc_int(Db, FullDocInfo, Options);
     not_found ->
         {not_found, missing}
@@ -1515,42 +1526,111 @@ get_prop(Db, Key, Default) ->
     Engine:get(EngineState, Key, Default).
 
 
-conv_fold_fun(Value, {UserFun, UserAcc, Conv}) ->
-    {NewValue, NewConv} = apply_conversions(Value, Conv)
-    {Go, NewUserAcc} = UserFun(NewValue, UserAcc),
-    {Go, {UserFun, NewUserAcc, NewConv}}.
+get_doc_type_conv(Options) ->
+    lists:foldl(fun(Opt, Acc) ->
+        case Opt of
+            doc ->
+                fun conv_to_doc/2;
+            doc_info ->
+                fun conv_to_doc_info/2;
+            full_doc_info ->
+                fun conv_to_full_doc_info/2;
+            _ ->
+                Acc
+        end
+    end, fun conv_to_full_doc_info/2, Options).
 
 
-apply_conversions(Value, []) ->
-    {Value, []};
-apply_conversions(Value, [{Fun, St} | Rest]) ->
-    case Fun(Value, St) of
-        {ok, NewValue, NewSt} ->
-            [{Fun, NewSt} | apply_conversions(NewValue, Rest)];
-        {skip, NewSt} ->
-            [{Fun, NewSt} | Rest]
+conv_to_doc(#full_doc_info{}=FDI, {Db, UserFun, UserAcc}) ->
+    #full_doc_info{
+        id = Id,
+        rev_tree = RevTree
+    } = FDI,
+    #doc_info{
+        revs = [#rev_info{deleted = IsDeleted, rev = Rev, body_sp = Bp} | _]
+    } = couch_doc:to_doc_info(FDI),
+    {[{_, RevPath}], []} = couch_key_tree:get(RevTree, [Rev]),
+    Doc = make_doc(Db, Id, IsDeleted, Bp, RevPath),
+    {Go, NewUserAcc} = UserFun(Doc, UserAcc),
+    {Go, {Db, UserFun, NewUserAcc}}.
+
+
+conv_to_doc_info(#full_doc_info{} = FDI, {Db, UserFun, UserAcc}) ->
+    DocInfo = couch_doc:to_doc_info(FDI),
+    {Go, NewUserAcc} = UserFun(DocInfo, UserAcc),
+    {Go, {Db, UserFun, NewUserAcc}}.
+
+
+conv_to_full_doc_info(#full_doc_info{} = FDI, {Db, UserFun, UserAcc}) ->
+    {Go, NewUserAcc} = UserFun(FDI, UserAcc),
+    {Go, {Db, UserFun, NewUserAcc}}.
+
+
+set_design_doc_keys(Options1) ->
+    Dir = case lists:keyfind(dir, 1, Options1) of
+        {dir, D0} -> D0;
+        _ -> fwd
+    end,
+    Options2 = set_design_doc_start_key(Options1, Dir),
+    set_design_doc_end_key(Options2, Dir).
+
+
+-define(FIRST_DDOC_KEY, <<"_design/">>).
+-define(LAST_DDOC_KEY, <<"_design0">>).
+
+
+set_design_doc_start_key(Options, fwd) ->
+    Key1 = couch_util:get_value(start_key, Options, ?FIRST_DDOC_KEY),
+    Key2 = case Key1 < ?FIRST_DDOC_KEY of
+        true -> ?FIRST_DDOC_KEY;
+        false -> Key1
+    end,
+    lists:keystore(start_key, 1, Options, {start_key, Key2});
+set_design_doc_start_key(Options, rev) ->
+    Key1 = couch_util:get_value(start_key, Options, ?LAST_DDOC_KEY),
+    Key2 = case Key1 > ?LAST_DDOC_KEY of
+        true -> ?LAST_DDOC_KEY;
+        false -> Key1
+    end,
+    lists:keystore(start_key, 1, Options, {start_key, Key2}).
+
+
+set_design_doc_end_key(Options, fwd) ->
+    case couch_util:get_value(end_key_gt, Options) of
+        undefined ->
+            Key1 = couch_util:get_value(end_key, Options, ?LAST_DDOC_KEY),
+            Key2 = case Key1 > ?LAST_DDOC_KEY of
+                true -> ?LAST_DDOC_KEY;
+                false -> Key1
+            end,
+            lists:keystore(end_key, 1, Options, {end_key, Key2});
+        EKeyGT ->
+            Key2 = case EKeyGT > ?LAST_DDOC_KEY of
+                true -> ?LAST_DDOC_KEY;
+                false -> EKeyGT
+            end,
+            lists:keystore(end_key_gt, 1, Options, {end_key_gt, Key2})
+    end;
+set_design_doc_end_key(Options, rev) ->
+    case couch_util:get_value(end_key_gt, Options) of
+        undefined ->
+            Key1 = couch_util:get_value(end_key, Options, ?LAST_DDOC_KEY),
+            Key2 = case Key1 < ?FIRST_DDOC_KEY of
+                true -> ?FIRST_DDOC_KEY;
+                false -> Key1
+            end,
+            lists:keystore(end_key, 1, Options, {end_key, Key2});
+        EKeyGT ->
+            Key2 = case EKeyGT < ?FIRST_DDOC_KEY of
+                true -> ?FIRST_DDOC_KEY;
+                false -> EKeyGT
+            end,
+            lists:keystore(end_key_gt, 1, Options, {end_key_gt, Key2})
     end.
 
 
-get_doc_type_conv(Db, Options) ->
-    lists:foldl(fun(Opt, Acc) ->
-        case Opt of
-            doc -> {fun conv_to_doc/2, Db};
-            doc_info -> {fun conv_to_doc_info/2, undefined};
-            full_doc_info -> [];
-            _ -> Acc
-        end
-    end, [], Options).
-
-
-conv_to_doc(#full_doc_info{}=FDI, Db) ->
-    #doc_info{
-        revs = [#rev_info{deleted = IsDeleted, rev = Rev, body_sp = Bp} | _]
-    } = DocInfo = couch_doc:to_doc_info(FullDocInfo),
-    {[{_, RevPath}], []} = couch_key_tree:get(RevTree, [Rev]),
-    Doc = make_doc(Db, Id, IsDeleted, Bp, RevPath),
-    {ok, Doc, Db}.
-
-
-conv_to_doc_info(#full_doc_info{} = FDI, Acc) ->
-    {ok, couch_doc:to_doc_info(FDI), Acc}.
+only_ddoc_fold(#full_doc_info{id = <<"_design/", _/binary>>}=FDI, {Fun, Acc}) ->
+    {Go, NewAcc} = Fun(FDI, Acc),
+    {Go, {Fun, NewAcc}};
+only_ddoc_fold(_, _) ->
+    erlang:error(invalid_design_doc_fold).

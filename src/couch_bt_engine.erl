@@ -7,7 +7,9 @@
     terminate/2,
     handle_info/2,
 
-    close/1,
+    incref/1,
+    decref/1,
+    monitored_by/1,
 
     delete/2,
     delete/3,
@@ -23,7 +25,6 @@
     open_docs/2,
     open_local_docs/2,
     read_doc/2,
-    get_design_docs/1,
 
     make_doc_summary/2,
     write_doc_summary/2,
@@ -59,7 +60,6 @@
 
 
 -export([
-
     id_tree_split/1,
     id_tree_join/2,
     id_tree_reduce/2,
@@ -119,8 +119,21 @@ handle_info({'DOWN', Ref, _, _, _}, #st{fd_monitor=Ref} = St) ->
     {stop, normal, St#st{fd=undefined, fd_monitor=closed}}.
 
 
-close(St) ->
+incref(St) ->
+    {ok, St#st{fd_monitor = erlang:monitor(process, St#st.fd)}}.
+
+
+decref(St) ->
     erlang:demonitor(St#st.fd_monitor, [flush]).
+
+
+monitored_by(St) ->
+    case erlang:process_info(St#st.fd, monitored_by) of
+        undefined ->
+            [];
+        Else ->
+            Else
+    end.
 
 
 delete(St, RootDir) ->
@@ -187,7 +200,7 @@ set(#st{} = St, DbProp, Value) ->
     #st{
         header = Header
     } = St,
-    {ok, #st{
+    {ok, St#st{
         header = couch_bt_engine_header:set(Header, DbProp, Value),
         needs_commit = true
     }}.
@@ -228,23 +241,6 @@ read_doc(#st{} = St, Pos) ->
     couch_file:pread_term(St#st.fd, Pos).
 
 
-get_design_docs(St) ->
-    FoldFun = pipe([fun skip_deleted/4], fun
-        (#full_doc_info{deleted = true}, _Reds, Acc) ->
-            {ok, Acc};
-        (#full_doc_info{id = Id} = FDI, _Reds, Acc) ->
-            case Id of
-                <<?DESIGN_DOC_PREFIX, _/binary>> ->
-                    {ok, [FDI | Acc]};
-                _ ->
-                    {stop, Acc}
-            end
-    end),
-    KeyOpts = [{start_key, <<"_design/">>}, {end_key_gt, <<"_design0">>}],
-    {ok, _, Docs} = couch_btree:fold(St#st.id_tree, FoldFun, [], KeyOpts),
-    {ok, lists:reverse(Docs)}.
-
-
 make_doc_summary(#st{} = St, {Body0, Atts0}) ->
     Comp = St#st.compression,
     Body = case couch_compress:is_compressed(Body0, Comp) of
@@ -276,11 +272,11 @@ write_doc_infos(#st{} = St, FullDocInfos, RemoveSeqs, LocalDocs) ->
     {ok, IdTree2} = couch_btree:add_remove(IdTree, FullDocInfos, []),
     {ok, SeqTree2} = couch_btree:add_remove(SeqTree, FullDocInfos, RemoveSeqs),
     {ok, LocalTree2} = couch_btree:add_remove(LocalTree, LocalDocs, []),
-    St#st{
+    {ok, St#st{
         id_tree = IdTree2,
         seq_tree = SeqTree2,
         local_tree = LocalTree2
-    }.
+    }}.
 
 
 open_write_stream(#st{} = St, Options) ->
@@ -353,7 +349,7 @@ fold_docs(St, UserFun, UserAcc, Options) ->
         false -> fun drop_reductions/4
     end,
     InAcc = {RedFun, {UserFun, UserAcc}},
-    {ok, Red, OutAcc} = couch_btree:fold(St#st.id_tree, Fun, InAcc, Opts),
+    {ok, Red, OutAcc} = couch_btree:fold(St#st.id_tree, Fun, InAcc, Options),
     {_, {_, FinalUserAcc}} = OutAcc,
     case lists:member(include_reductions, Options) of
         true ->
@@ -368,14 +364,14 @@ fold_local_docs(St, UserFun, UserAcc, Options) ->
     InAcc = {UserFun, UserAcc},
     {ok, _, OutAcc} = couch_btree:fold(St#st.local_tree, Fun, InAcc, Options),
     {_, FinalUserAcc} = OutAcc,
-    {ok, OutAcc}.
+    {ok, FinalUserAcc}.
 
 
 fold_changes(St, SinceSeq, UserFun, UserAcc, Options) ->
     Fun = fun drop_reductions/4,
     InAcc = {UserFun, UserAcc},
-    Opts = [{start_key, StartSeq + 1}] ++ Options,
-    {ok, _, OutAcc} = couch_btree:fold(SeqTree, Fun, InAcc, Opts),
+    Opts = [{start_key, SinceSeq + 1}] ++ Options,
+    {ok, _, OutAcc} = couch_btree:fold(St#st.seq_tree, Fun, InAcc, Opts),
     {_, FinalUserAcc} = OutAcc,
     {ok, FinalUserAcc}.
 
@@ -434,12 +430,12 @@ finish_compaction(#st{} = OldSt, #st{} = NewSt1) ->
     delete(RootDir, FilePath ++ ".compact.meta"),
 
     % We're finished with our old state
-    close(OldSt),
+    decref(OldSt),
 
     % And return our finished new state
-    NewSt3#st{
+    {ok, NewSt3#st{
         filepath = FilePath
-    }.
+    }}.
 
 
 id_tree_split(#full_doc_info{}=Info) ->
@@ -612,9 +608,9 @@ init_state(FilePath, Fd, Header0, Options) ->
     % uuid each time it was reopened.
     case Header /= Header0 of
         true ->
-            {ok, commit_data(St)};
+            commit_data(St);
         false ->
-            {ok, St}
+            St
     end.
 
 
@@ -720,14 +716,16 @@ active_size(#st{} = St, #size_info{} = SI) ->
 
 % First element of the reductions is the total
 % number of undeleted documents.
-skip_deleted(traverse, Entry, {0, _, _} = Reds, Acc) ->
+skip_deleted(traverse, _Entry, {0, _, _} = _Reds, Acc) ->
     {skip, Acc};
+skip_deleted(visit, #full_doc_info{deleted = true}, _, Acc) ->
+    {ok, Acc};
 skip_deleted(Case, Entry, Reds, {UserFun, UserAcc}) ->
-    {Go, NewUseAcc} = UserFun(Case, Entry, Reds, UserAcc),
+    {Go, NewUserAcc} = UserFun(Case, Entry, Reds, UserAcc),
     {Go, {UserFun, NewUserAcc}}.
-    
 
-include_reductions(visit, FDI, _Reds, {UserFun, UserAcc}) ->
+
+include_reductions(visit, FDI, Reds, {UserFun, UserAcc}) ->
     {Go, NewUserAcc} = UserFun(FDI, Reds, UserAcc),
     {Go, {UserFun, NewUserAcc}};
 include_reductions(_, _, _, Acc) ->
