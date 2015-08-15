@@ -130,7 +130,7 @@ delete_compaction_files(DbName) when is_list(DbName) ->
     RootDir = config:get("couchdb", "database_dir", "."),
     lists:foreach(fun({Ext, Module}) ->
         FilePath = make_filepath(RootDir, DbName, Ext),
-        Module:clear_compaction_data(FilePath)
+        Module:delete_compaction_files(RootDir, FilePath)
     end, get_configured_engines()),
     ok;
 delete_compaction_files(DbName) when is_binary(DbName) ->
@@ -480,13 +480,13 @@ handle_call({delete, DbName, Options}, _From, Server) ->
         [#srv_entry{pid=Pid, waiters=Waiters}=SE] when is_list(Waiters) ->
             true = ets:delete(couch_dbs, DbName),
             true = ets:delete(couch_dbs_pid_to_name, Pid),
-            exit(Pid, kill),
+            couch_util:shutdown_sync(Pid),
             [gen_server:reply(F, not_found) || F <- Waiters],
             db_closed(Server, SE#srv_entry.db_options);
         [#srv_entry{pid=Pid}=SE] ->
             true = ets:delete(couch_dbs, DbName),
             true = ets:delete(couch_dbs_pid_to_name, Pid),
-            exit(Pid, kill),
+            couch_util:shutdown_sync(Pid),
             db_closed(Server, SE#srv_entry.db_options)
         end,
 

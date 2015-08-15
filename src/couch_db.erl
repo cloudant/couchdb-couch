@@ -337,9 +337,13 @@ purge_docs(#db{main_pid=Pid}, IdsRevs) ->
 get_committed_update_seq(#db{committed_update_seq=Seq}) ->
     Seq.
 
+get_user_ctx(#cdb{} = Db) ->
+    Db#cdb.user_ctx;
 get_user_ctx(#db{} = Db) ->
     Db#db.user_ctx.
 
+set_user_ctx(#cdb{} = Db, #user_ctx{} = UserCtx) ->
+    {ok, Db#cdb{user_ctx = UserCtx}};
 set_user_ctx(#db{} = Db, #user_ctx{} = UserCtx) ->
     {ok, Db#db{user_ctx = UserCtx}}.
 
@@ -546,6 +550,9 @@ set_revs_limit(#db{main_pid=Pid}=Db, Limit) when Limit > 0 ->
 set_revs_limit(_Db, _Limit) ->
     throw(invalid_revs_limit).
 
+
+name(#cdb{name=Name}) ->
+    Name;
 name(#db{name=Name}) ->
     Name.
 
@@ -1246,7 +1253,8 @@ fold_docs(Db, UserFun, UserAcc, Options) ->
             fold_design_docs(Db, UserFun, UserAcc, Options);
         {namespace, <<"_local">>} ->
             fold_local_docs(Db, UserFun, UserAcc, Options);
-        _ ->
+        _Else ->
+            couch_log:error("XKCD: ~p", [_Else]),
             fold_all_docs(Db, UserFun, UserAcc, Options)
     end.
 
@@ -1300,13 +1308,22 @@ fold_design_docs(Db, UserFun, UserAcc, Options1) ->
     #db{
         engine = {Engine, EngineState}
     } = Db,
-    Fun1 = get_doc_type_conv(Options1),
-    Fun2 = fun only_ddoc_fold/2,
-    Acc1 = {Fun1, {Db, UserFun, UserAcc}},
+
     Options2 = set_design_doc_keys(Options1),
-    {ok, Acc2} = Engine:fold_docs(EngineState, Fun2, Acc1, Options2),
-    {_, {_, _, FinalUserAcc}} = Acc2,
-    {ok, FinalUserAcc}.
+
+    % FIXME: Same as above. couch_mrview is doing
+    % terribleness here.
+    case lists:member(include_reductions, Options2) of
+        true ->
+            Engine:fold_docs(EngineState, UserFun, UserAcc, Options2);
+        false ->
+            Fun1 = get_doc_type_conv(Options1),
+            Fun2 = fun only_ddoc_fold/2,
+            Acc1 = {Fun1, {Db, UserFun, UserAcc}},
+            {ok, Acc2} = Engine:fold_docs(EngineState, Fun2, Acc1, Options2),
+            {_, {_, _, FinalUserAcc}} = Acc2,
+            {ok, FinalUserAcc}
+    end.
 
 
 fold_local_docs(Db, UserFun, UserAcc, Options) ->
@@ -1326,7 +1343,7 @@ open_doc_revs_int(Db, IdRevs, Options) ->
     lists:zipwith(
         fun({Id, Revs}, Lookup) ->
             case Lookup of
-            {ok, #full_doc_info{rev_tree=RevTree}} ->
+            #full_doc_info{rev_tree=RevTree} ->
                 {FoundRevs, MissingRevs} =
                 case Revs of
                 all ->

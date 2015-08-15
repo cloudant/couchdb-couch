@@ -108,8 +108,15 @@ init(FilePath, Options) ->
 terminate(_Reason, St) ->
     % If the reason we died is because our fd disappeared
     % then we don't need to try closing it again.
-    if St#st.fd_monitor == closed -> ok; true ->
-        ok = couch_file:close(St#st.fd)
+    Ref = St#st.fd_monitor,
+    if Ref == closed -> ok; true ->
+        ok = couch_file:close(St#st.fd),
+        receive
+            {'DOWN', Ref, _,  _, _} ->
+                ok
+            after 500 ->
+                ok
+        end
     end,
     couch_util:shutdown_sync(St#st.fd),
     ok.
@@ -350,11 +357,11 @@ fold_docs(St, UserFun, UserAcc, Options) ->
         false -> fun drop_reductions/4
     end,
     InAcc = {RedFun, {UserFun, UserAcc}},
-    {ok, Red, OutAcc} = couch_btree:fold(St#st.id_tree, Fun, InAcc, Options),
+    {ok, Reds, OutAcc} = couch_btree:fold(St#st.id_tree, Fun, InAcc, Options),
     {_, {_, FinalUserAcc}} = OutAcc,
     case lists:member(include_reductions, Options) of
         true ->
-            {ok, Red, FinalUserAcc};
+            {ok, fold_docs_reduce_to_count(Reds), FinalUserAcc};
         false ->
             {ok, FinalUserAcc}
     end.
@@ -740,4 +747,7 @@ drop_reductions(_, _, _, Acc) ->
     {ok, Acc}.
 
 
-
+fold_docs_reduce_to_count(Reds) ->
+    RedFun = fun id_tree_reduce/2,
+    FinalRed = couch_btree:final_reduce(RedFun, Reds),
+    element(1, FinalRed).
