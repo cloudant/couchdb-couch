@@ -689,6 +689,9 @@ upgrade_encoding(Encoding) -> Encoding.
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
+% Eww...
+-include("couch_db_int.hrl").
+-include("couch_bt_engine.hrl").
 
 %% Test utilities
 
@@ -743,7 +746,7 @@ attachment_disk_term_test_() ->
         {disk_len, 0},
         {md5, <<212,29,140,217,143,0,178,4,233,128,9,152,236,248,66,126>>},
         {revpos, 4},
-        {data, {stream, {fake_fd, fake_sp}}},
+        {data, {stream, {couch_bt_engine_stream, {fake_fd, fake_sp}}}},
         {encoding, identity}
     ]),
     BaseDiskTerm = {
@@ -757,6 +760,9 @@ attachment_disk_term_test_() ->
     Headers = [{<<"X-Foo">>, <<"bar">>}],
     ExtendedAttachment = store(headers, Headers, BaseAttachment),
     ExtendedDiskTerm = {BaseDiskTerm, [{headers, Headers}]},
+    FakeDb = #db{
+        engine = {couch_bt_engine, #st{}}
+    },
     {"Disk term tests", [
         ?_assertEqual(BaseDiskTerm, to_disk_term(BaseAttachment)),
         ?_assertEqual(BaseAttachment, from_disk_term(fake_fd, BaseDiskTerm)),

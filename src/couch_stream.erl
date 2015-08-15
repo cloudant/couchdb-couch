@@ -237,7 +237,7 @@ handle_call({write, Bin}, _From, Stream) ->
             WrittenLen2 = WrittenLen,
             Md5_2 = Md5;
         WriteBin2 ->
-            {ok, NewEngine} = do_write(Engine, WriteBin2),
+            NewEngine = do_write(Engine, WriteBin2),
             WrittenLen2 = WrittenLen + iolist_size(WriteBin2),
             Md5_2 = couch_crypto:hash_update(md5, Md5, WriteBin2),
             Written2 = [{Pos, iolist_size(WriteBin2)}|Written]
@@ -277,7 +277,7 @@ handle_call(close, _From, Stream) ->
     [] ->
         {do_finalize(Engine), WrittenLen, IdenLen, Md5Final, IdenMd5Final};
     _ ->
-        {ok, NewEngine} = do_write(Engine, WriteBin2),
+        NewEngine = do_write(Engine, WriteBin2),
         StreamLen = WrittenLen + iolist_size(WriteBin2),
         {do_finalize(NewEngine), StreamLen, IdenLen, Md5Final, IdenMd5Final}
     end,
@@ -298,13 +298,13 @@ handle_info(_Info, State) ->
 
 do_seek({Engine, EngineState}, Offset) ->
     {ok, NewState} = Engine:seek(EngineState, Offset),
-    {ok, {Engine, NewState}}.
+    {Engine, NewState}.
 
 do_write({Engine, EngineState}, Data) ->
     {ok, NewState} = Engine:write(EngineState, Data),
-    {ok, {Engine, NewState}}.
+    {Engine, NewState}.
 
 do_finalize({Engine, EngineState}) ->
     {ok, NewState} = Engine:finalize(EngineState),
-    {ok, {Engine, NewState}}.
+    {Engine, NewState}.
 

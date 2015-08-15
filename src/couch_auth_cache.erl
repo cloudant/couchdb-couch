@@ -333,9 +333,8 @@ refresh_entries(AuthDb) ->
         NewSeq = couch_db:get_update_seq(AuthDb2),
         case NewSeq > OldSeq of
         true ->
-            Options = [{start_key, OldSeq}],
-            Fun = fun(DocInfo, _, _) -> refresh_entry(AuthDb2, DocInfo) end,
-            {ok, _} = couch_db:fold_changes(AuthDb2, Options, Fun, nil),
+            Fun = fun(DocInfo, _) -> refresh_entry(AuthDb2, DocInfo) end,
+            {ok, _} = couch_db:fold_changes(AuthDb2, OldSeq, Fun, nil),
             true = ets:insert(?STATE, {auth_db, AuthDb2});
         false ->
             ok

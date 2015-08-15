@@ -52,19 +52,19 @@ seek({Fd, [Pos | Rest]}, Offset) when is_integer(Pos) ->
             seek({Fd, Rest}, Offset - size(Bin));
         false ->
             <<_:Offset/binary, Tail/binary>> = Bin,
-            {Fd, [Tail | Rest]}
+            {ok, {Fd, [Tail | Rest]}}
     end.
-    
+
 
 write({Fd, Written}, Data) when is_pid(Fd) ->
     {ok, Pos, _} = couch_file:append_binary(Fd, Data),
-    {ok, {Fd, [{Pos, iolist_size(Written)} | Written]}}.
+    {ok, {Fd, [{Pos, iolist_size(Data)} | Written]}}.
 
 
 finalize({Fd, Written}) ->
-    {Fd, lists:reverse(Written)}.
+    {ok, {Fd, lists:reverse(Written)}}.
 
 
 to_disk_term({_Fd, Written}) ->
-    Written.
+    {ok, Written}.
 

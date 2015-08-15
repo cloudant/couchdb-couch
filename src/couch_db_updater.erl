@@ -23,7 +23,6 @@
 
 
 init({Engine, DbName, FilePath, Options}) ->
-    couch_log:error("STARTING DB: ~s", [DbName]),
     erlang:put(io_priority, {db_update, DbName}),
     try
         Db = case Engine:init(FilePath, Options) of

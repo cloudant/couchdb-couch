@@ -171,7 +171,7 @@ copy_compact(DbName, St, NewSt0, Retry) ->
     NewSt3 = copy_docs(St, NewSt2, lists:reverse(Uncopied), Retry),
 
     % Copy the security information over
-    NewSt4 = case couch_bt_engine:get_security(St) of
+    {ok, NewSt4} = case couch_bt_engine:get_security(St) of
         {ok, []} ->
             couch_bt_engine:set(NewSt3, security_ptr, nil);
         {ok, SecProps} ->
@@ -181,7 +181,7 @@ copy_compact(DbName, St, NewSt0, Retry) ->
     end,
 
     FinalUpdateSeq = couch_bt_engine:get(St, update_seq),
-    NewSt5 = couch_bt_engine:set(NewSt4, update_seq, FinalUpdateSeq),
+    {ok, NewSt5} = couch_bt_engine:set(NewSt4, update_seq, FinalUpdateSeq),
     commit_compaction_data(NewSt5).
 
 

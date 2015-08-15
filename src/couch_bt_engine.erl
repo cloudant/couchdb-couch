@@ -321,12 +321,12 @@ get_last_purged(#st{} = St) ->
 
 get_doc_count(#st{} = St) ->
     {ok, {Count, _, _}} = couch_btree:full_reduce(St#st.id_tree),
-    {ok, Count}.
+    Count.
 
 
 get_del_doc_count(#st{} = St) ->
     {ok, {_, DelCount, _}} = couch_btree:full_reduce(St#st.id_tree),
-    {ok, DelCount}.
+    DelCount.
 
 
 get_size_info(#st{} = St) ->

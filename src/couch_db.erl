@@ -17,7 +17,7 @@
 -export([incref/1]).
 -export([start_compact/1, start_compact/2, cancel_compact/1]).
 -export([wait_for_compaction/1, wait_for_compaction/2]).
--export([is_idle/1,monitor/1,pid/1]).
+-export([is_idle/1,monitor/1,pid/1,compactor_pid/1]).
 -export([update_doc/3,update_doc/4,update_docs/4,update_docs/2,update_docs/3,delete_doc/3]).
 -export([get_doc_info/2,get_full_doc_info/2,get_full_doc_infos/2]).
 -export([open_doc/2,open_doc/3,open_doc_revs/4, open_docs/2, open_docs/3]).
@@ -131,6 +131,8 @@ is_db(_Else) -> false.
 pid(#db{} = Db) ->
     Db#db.main_pid.
 
+compactor_pid(#db{} = Db) ->
+    Db#db.compactor_pid.
 
 is_system_db(#db{options = Options}) ->
     lists:member(sys_db, Options).
@@ -391,8 +393,8 @@ get_db_info(Db) ->
         instance_start_time = StartTime,
         committed_update_seq=CommittedUpdateSeq
     } = Db,
-    {ok, DocCount} = get_doc_count(Db),
-    {ok, DelDocCount} = get_del_doc_count(Db),
+    DocCount = get_doc_count(Db),
+    DelDocCount = get_del_doc_count(Db),
     SizeInfo = Engine:get_size_info(EngineState),
     DiskVersion = get_prop(Db, disk_version),
     Uuid = case get_uuid(Db) of
@@ -754,7 +756,7 @@ prep_and_validate_updates(Db, [DocBucket|RestBuckets], [not_found|RestLookups],
     prep_and_validate_updates(Db, RestBuckets, RestLookups, AllowConflict,
             [PreppedBucket | AccPrepped], AccErrors3);
 prep_and_validate_updates(Db, [DocBucket|RestBuckets],
-        [{ok, #full_doc_info{rev_tree=OldRevTree}=OldFullDocInfo}|RestLookups],
+        [#full_doc_info{rev_tree=OldRevTree}=OldFullDocInfo|RestLookups],
         AllowConflict, AccPrepped, AccErrors) ->
     Leafs = couch_key_tree:get_all_leafs(OldRevTree),
     LeafRevsDict = dict:from_list([
