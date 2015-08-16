@@ -69,8 +69,9 @@ open(Filepath, Options) ->
             case {lists:member(nologifmissing, Options), Reason} of
             {true, enoent} -> ok;
             _ ->
-            couch_log:error("Could not open file ~s: ~s",
-                            [Filepath, file:format_error(Reason)])
+            {_, Stack} = process_info(self(), current_stacktrace),
+            couch_log:error("Could not open file ~s: ~s ~p",
+                            [Filepath, file:format_error(Reason), Stack])
             end,
             Error
         end;

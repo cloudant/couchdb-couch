@@ -416,26 +416,54 @@ finish_compaction(#st{} = OldSt, #st{} = NewSt1) ->
     {ok, _, LocalDocs} = couch_btree:foldl(OldLocal, LoadFun, []),
     {ok, NewLocal2} = couch_btree:add(NewLocal1, LocalDocs),
 
-    NewSt2 = ?MODULE:set(NewSt1, compact_seq, ?MODULE:get(OldSt, update_seq)),
+    CompactedSeq = ?MODULE:get(OldSt, update_seq),
+    {ok, NewSt2} = ?MODULE:set(NewSt1, compacted_seq, CompactedSeq),
     NewSt3 = commit_data(NewSt2#st{
         local_tree = NewLocal2
     }),
+
+    couch_log:error("XKCD 1: ~s ~s ~s ~s ~s ~s", [
+            CompactDataPath,
+            filelib:is_file(CompactDataPath),
+            FilePath ++ ".compact",
+            filelib:is_file(FilePath ++ ".compact"),
+            FilePath,
+            filelib:is_file(FilePath)
+        ]),
 
     % Rename our *.compact.data file to *.compact so that if we
     % die between deleting the old file and renaming *.compact
     % we can recover correctly.
     ok = file:rename(CompactDataPath, FilePath ++ ".compact"),
 
+    couch_log:error("XKCD 2: ~s ~s ~s ~s ~s ~s", [
+            CompactDataPath,
+            filelib:is_file(CompactDataPath),
+            FilePath ++ ".compact",
+            filelib:is_file(FilePath ++ ".compact"),
+            FilePath,
+            filelib:is_file(FilePath)
+        ]),
+
     % Remove the uncompacted database file
     RootDir = config:get("couchdb", "database_dir", "."),
-    delete(RootDir, FilePath, true),
+    couch_file:delete(RootDir, FilePath),
+
+    couch_log:error("XKCD 3: ~s ~s ~s ~s ~s ~s", [
+            CompactDataPath,
+            filelib:is_file(CompactDataPath),
+            FilePath ++ ".compact",
+            filelib:is_file(FilePath ++ ".compact"),
+            FilePath,
+            filelib:is_file(FilePath)
+        ]),
 
     % Move our compacted file into its final location
     ok = file:rename(FilePath ++ ".compact", FilePath),
 
     % Delete the old meta compaction file after promoting
     % the compaction file.
-    delete(RootDir, FilePath ++ ".compact.meta"),
+    couch_file:delete(RootDir, FilePath ++ ".compact.meta"),
 
     % We're finished with our old state
     decref(OldSt),

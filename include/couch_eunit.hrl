@@ -47,10 +47,9 @@
     end).
 -define(tempdb,
     fun() ->
-            Nums = tuple_to_list(erlang:now()),
-            Prefix = "eunit-test-db",
-            Suffix = lists:concat([integer_to_list(Num) || Num <- Nums]),
-            list_to_binary(Prefix ++ "-" ++ Suffix)
+            {Mega, Sec, Micro} = erlang:now(),
+            Timestamp = Mega * 1000000 * 1000000 + Sec * 1000000 + Micro,
+            list_to_binary("eunit-test-db-" ++ integer_to_list(Timestamp))
     end).
 -define(docid,
     fun() ->

@@ -348,13 +348,18 @@ init_db(DbName, Engine, EngineState, Options) ->
     BDU = couch_util:get_value(before_doc_update, Options, nil),
     ADR = couch_util:get_value(after_doc_read, Options, nil),
 
+    CleanedOptions = lists:foldl(fun
+        (create, Acc) -> Acc;
+        (Else, Acc) -> [Else | Acc]
+    end, [], Options),
+
     #db{
         name = DbName,
         engine = {Engine, EngineState},
         committed_update_seq = Engine:get(EngineState, update_seq),
         security = SecProps,
         instance_start_time = StartTime,
-        options = Options,
+        options = CleanedOptions,
         before_doc_update = BDU,
         after_doc_read = ADR
     }.
