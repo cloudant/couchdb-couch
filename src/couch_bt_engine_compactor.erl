@@ -339,19 +339,13 @@ copy_meta_data(#st{} = St) ->
 open_compaction_file(FilePath) ->
     case couch_file:open(FilePath, [nologifmissing]) of
         {ok, Fd} ->
-            couch_log:error("XKCD: Open 1 ~p ~s", [self(), FilePath]),
             case couch_file:read_header(Fd) of
                 {ok, Header} -> {ok, Fd, Header};
                 no_valid_header -> {ok, Fd, nil}
             end;
         {error, enoent} ->
-            case couch_file:open(FilePath, [create]) of
-                {ok, Fd} ->
-                    couch_log:error("XKCD: Open 2 ~p ~s", [self(), FilePath]),
-                    {ok, Fd, nil};
-                Else ->
-                    couch_log:error("XKCD: Open 3 ~p ~s ~p", [self(), FilePath, Else])
-            end
+            {ok, Fd} = couch_file:open(FilePath, [create]),
+            {ok, Fd, nil}
     end.
 
 

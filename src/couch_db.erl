@@ -807,7 +807,7 @@ prep_and_validate_replicated_updates(Db, [Bucket|RestBuckets], [OldInfo|RestOldI
             end,
             {[], AccErrors}, Bucket),
         prep_and_validate_replicated_updates(Db, RestBuckets, RestOldInfo, [ValidatedBucket | AccPrepped], AccErrors3);
-    {ok, #full_doc_info{rev_tree=OldTree}} ->
+    #full_doc_info{rev_tree=OldTree} ->
         RevsLimit = get_revs_limit(Db),
         OldLeafs = couch_key_tree:get_all_leafs_full(OldTree),
         OldLeafsLU = [{Start, RevId} || {Start, [{RevId, _}|_]} <- OldLeafs],

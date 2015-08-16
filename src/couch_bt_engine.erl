@@ -66,7 +66,10 @@
 
     seq_tree_split/1,
     seq_tree_join/2,
-    seq_tree_reduce/2
+    seq_tree_reduce/2,
+
+    local_tree_split/1,
+    local_tree_join/2
 ]).
 
 
@@ -234,13 +237,9 @@ open_docs(#st{} = St, DocIds) ->
 
 
 open_local_docs(#st{} = St, DocIds) ->
-    % Need to convert the old style local doc
-    % to a #doc{} record like used to happen
-    % in open_doc_int
-    erlang:error(vomit),
     Results = couch_btree:lookup(St#st.local_tree, DocIds),
     lists:map(fun
-        ({ok, Doc}) -> Doc;
+        ({ok, #doc{} = Doc}) -> Doc;
         (not_found) -> not_found
     end, Results).
 
@@ -539,6 +538,30 @@ seq_tree_reduce(rereduce, Reds) ->
     lists:sum(Reds).
 
 
+local_tree_split(#doc{} = Doc) ->
+    #doc{
+        id = Id,
+        revs = {0, [Rev]},
+        body = BodyData
+    } = Doc,
+    {Id, {Rev, BodyData}}.
+
+
+local_tree_join(Id, {Rev, BodyData}) when is_binary(Rev) ->
+    #doc{
+        id = Id,
+        revs = {0, [Rev]},
+        body = BodyData
+    };
+
+local_tree_join(Id, {Rev, BodyData}) when is_integer(Rev) ->
+    #doc{
+        id = Id,
+        revs = {0, [list_to_binary(integer_to_list(Rev))]},
+        body = BodyData
+    }.
+
+
 open_db_file(FilePath, Options) ->
     case couch_file:open(FilePath, Options) of
         {ok, Fd} ->
@@ -592,6 +615,8 @@ init_state(FilePath, Fd, Header0, Options) ->
 
     LocalTreeState = couch_db_header:local_tree_state(Header),
     {ok, LocalTree} = couch_btree:open(LocalTreeState, Fd, [
+            {split, fun ?MODULE:local_tree_split/1},
+            {join, fun ?MODULE:local_tree_join/2},
             {compression, Compression}
         ]),
 

@@ -672,9 +672,9 @@ update_local_doc_revs(Docs) ->
         end,
         NewRev = case Delete of
             false ->
-                {0, ?l2b(integer_to_list(PrevRev + 1))};
+                ?l2b(integer_to_list(PrevRev + 1));
             true  ->
-                {0, <<"0">>}
+                <<"0">>
         end,
         send_result(Client, NewDoc, {ok, NewRev}),
         NewDoc#doc{
