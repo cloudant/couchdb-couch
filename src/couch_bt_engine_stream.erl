@@ -47,7 +47,7 @@ seek({Fd, [{Pos, Length} | Rest]}, Offset) ->
 
 seek({Fd, [Pos | Rest]}, Offset) when is_integer(Pos) ->
     {ok, Bin} = couch_file:pread_iolist(Fd, Pos),
-    case size(Bin) =< Offset of
+    case iolist_size(Bin) =< Offset of
         true ->
             seek({Fd, Rest}, Offset - size(Bin));
         false ->
