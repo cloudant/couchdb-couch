@@ -504,11 +504,7 @@ get_members(#db{security=SecProps}) ->
         couch_util:get_value(<<"readers">>, SecProps, {[]})).
 
 get_security(#db{security=SecProps}) ->
-    {SecProps};
-get_security(Else) ->
-    {_, Stack} = process_info(self(), current_stacktrace),
-    couch_log:error("XKCD: STACK: ~p ~p", [self(), Stack]),
-    erlang:error(badarg).
+    {SecProps}.
 
 set_security(#db{main_pid=Pid}=Db, {NewSecProps}) when is_list(NewSecProps) ->
     check_is_admin(Db),

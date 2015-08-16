@@ -171,7 +171,6 @@ compact_db(DbName) ->
     wait_compaction(DbName, "database", ?LINE),
     ok = couch_db:close(Db),
     DiskSizeAfter = db_disk_size(DbName),
-    couch_log:error("XKCD: ~p ~p", [DiskSizeBefore, DiskSizeAfter]),
     ?assert(DiskSizeBefore > DiskSizeAfter).
 
 compact_view(DbName) ->
