@@ -270,13 +270,21 @@ write_doc_summary(St, SummaryBinary) ->
     couch_file:append_raw_chunk(Fd, SummaryBinary).
 
 
-write_doc_infos(#st{} = St, FullDocInfos, RemoveSeqs, LocalDocs) ->
+write_doc_infos(#st{} = St, Pairs, RemoveSeqs, LocalDocs) ->
     #st{
         id_tree = IdTree,
         seq_tree = SeqTree,
         local_tree = LocalTree
     } = St,
-    {ok, IdTree2} = couch_btree:add_remove(IdTree, FullDocInfos, []),
+    {Write, Remove} = lists:foldl(fun({OldFDI, NewFDI}, {WriteAcc, RemAcc}) ->
+        case {OldFDI, NewFDI} of
+            {_, #full_doc_info{}} ->
+                {[NewFDI | WriteAcc], RemAcc};
+            {#full_doc_info{id = Id}, not_found} ->
+                {WriteAcc, [Id | RemAcc]}
+        end
+    end, {[], []}, Pairs),    
+    {ok, IdTree2} = couch_btree:add_remove(IdTree, Write, Remove),
     {ok, SeqTree2} = couch_btree:add_remove(SeqTree, FullDocInfos, RemoveSeqs),
     {ok, LocalTree2} = couch_btree:add_remove(LocalTree, LocalDocs, []),
     {ok, St#st{
