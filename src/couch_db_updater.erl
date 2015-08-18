@@ -170,8 +170,10 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
 
     {FinalSeq, FDIs, RemSeqs, PurgedIdRevs} = FinalAcc,
 
+    PurgePairs = pair_purge_info(OldDocInfos, FDIs),
+
     {ok, NewState1} = Engine:set(EngineState, update_seq, FinalSeq + 1),
-    {ok, NewState2} = Engine:update_docs(NewState1, FDIs, RemSeqs),
+    {ok, NewState2} = Engine:update_docs(NewState1, PurgePairs, RemSeqs),
     {ok, NewState3} = Engine:store_purged(NewState2, PurgedIdRevs),
     {ok, NewState4} = Engine:commit_data(NewState3),
 
@@ -628,10 +630,12 @@ update_docs_int(Db, DocsList, NonRepDocs, MergeConflicts, FullCommit) ->
     % the trees, the attachments are already written to disk)
     {ok, IndexFDIs} = flush_trees(Db, NewFullDocInfos, []),
 
+    WritePairs = pair_write_info(OldDocLookups, IndexFDIs),
+
     NewNonRepDocs = update_local_doc_revs(NonRepDocs),
 
     {ok, NewState1} = Engine:write_doc_infos(
-            EngineState, IndexFDIs, RemSeqs, NewNonRepDocs),
+            EngineState, WritePairs, RemSeqs, NewNonRepDocs),
     {ok, NewState2} = Engine:set(NewState1, update_seq, NewSeq),
 
     Db2 = Db#db{
@@ -772,3 +776,21 @@ make_doc_summary(Db, DocParts) ->
         engine = {Engine, EngineState}
     } = Db,
     Engine:make_doc_summary(EngineState, DocParts).
+
+
+pair_write_info(Old, New) ->
+    lists:map(fun(FDI) ->
+        case lists:keysearch(FDI#full_doc_info.id, #full_doc_info.id, Old) of
+            #full_doc_info{} = OldFDI -> {OldFDI, FDI};
+            false -> {not_found, FDI}
+        end
+    end, MergedFDIs).
+
+
+pair_purge_info(Old, New) ->
+    lists:map(fun(FDI) ->
+        case lists:keysearch(FDI#full_doc_info.id, #full_doc_info.id, New) of
+            #full_doc_info{} = NewFDI -> {OldFDI, NewFDI};
+            false -> {FDI, not_found}
+        end
+    end, Old).
