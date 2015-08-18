@@ -137,24 +137,32 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
         } = OldFDI,
         {SeqAcc, FDIAcc, RemSeqAcc, IdRevsAcc} = Acc,
 
-        % Its possible to purge the #leaf{} that contains
-        % the update_seq where this doc sits in the update_seq
-        % sequence. Rather than do a bunch of complicated checks
-        % we just re-label every #leaf{} and reinsert it into
-        % the update_seq sequence.
-        {NewTree, NewSeqAcc} = couch_key_tree:mapfold(fun
-            (_RevId, Leaf, leaf, InnerSeqAcc) ->
-                {Leaf#leaf{seq = InnerSeqAcc + 1}, InnerSeqAcc + 1};
-            (_RevId, Value, _Type, InnerSeqAcc) ->
-                {Value, InnerSeqAcc}
-        end, SeqAcc, OldTree),
+        NewFDIAcc = case OldTree of
+            [] ->
+                % If we purged every #leaf{} in the doc record
+                % then we're removing it completely from the
+                % database.
+                FDIAcc;
+            _ ->
+                % Its possible to purge the #leaf{} that contains
+                % the update_seq where this doc sits in the update_seq
+                % sequence. Rather than do a bunch of complicated checks
+                % we just re-label every #leaf{} and reinsert it into
+                % the update_seq sequence.
+                {NewTree, NewSeqAcc} = couch_key_tree:mapfold(fun
+                    (_RevId, Leaf, leaf, InnerSeqAcc) ->
+                        {Leaf#leaf{seq = InnerSeqAcc + 1}, InnerSeqAcc + 1};
+                    (_RevId, Value, _Type, InnerSeqAcc) ->
+                        {Value, InnerSeqAcc}
+                end, SeqAcc, OldTree),
 
-        NewFDI = OldFDI#full_doc_info{
-            update_seq = NewSeqAcc,
-            rev_tree = NewTree
-        },
-        
-        NewFDIAcc = [NewFDI | FDIAcc],
+                NewFDI = OldFDI#full_doc_info{
+                    update_seq = NewSeqAcc,
+                    rev_tree = NewTree
+                },
+
+                [NewFDI | FDIAcc]
+        end,
         NewRemSeqAcc = [RemSeq | RemSeqAcc],
         NewIdRevsAcc = [{Id, RemRevs} | IdRevsAcc],
         {NewSeqAcc, NewFDIAcc, NewRemSeqAcc, NewIdRevsAcc}
