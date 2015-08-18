@@ -108,7 +108,8 @@ copy_compact(DbName, St, NewSt0, Retry) ->
     Compression = couch_compress:get_compression_method(),
     NewSt = NewSt0#st{compression = Compression},
     NewUpdateSeq = couch_bt_engine:get(NewSt0, update_seq),
-    TotalChanges = couch_bt_engine:count_changes_since(St, NewUpdateSeq),
+    CurrUpdateSeq = couch_bt_engine:get(St, update_seq),
+    TotalChanges = CurrUpdateSeq - NewUpdateSeq,
     BufferSize = list_to_integer(
         config:get("database_compaction", "doc_buffer_size", "524288")),
     CheckpointAfter = couch_util:to_integer(
@@ -148,7 +149,10 @@ copy_compact(DbName, St, NewSt0, Retry) ->
         {database, DbName},
         {progress, 0},
         {changes_done, 0},
-        {total_changes, TotalChanges}
+        {total_changes, TotalChanges},
+        {start_seq, NewUpdateSeq},
+        {current_seq, NewUpdateSeq},
+        {target_seq, CurrUpdateSeq}
     ],
     case (Retry =/= nil) and couch_task_status:is_task_added() of
     true ->
@@ -156,7 +160,10 @@ copy_compact(DbName, St, NewSt0, Retry) ->
             {retry, true},
             {progress, 0},
             {changes_done, 0},
-            {total_changes, TotalChanges}
+            {total_changes, TotalChanges},
+            {start_seq, NewUpdateSeq},
+            {current_seq, NewUpdateSeq},
+            {target_seq, CurrUpdateSeq}
         ]);
     false ->
         couch_task_status:add_task(TaskProps0),
@@ -180,8 +187,7 @@ copy_compact(DbName, St, NewSt0, Retry) ->
             couch_bt_engine:set(NewSt3, security_ptr, Ptr)
     end,
 
-    FinalUpdateSeq = couch_bt_engine:get(St, update_seq),
-    {ok, NewSt5} = couch_bt_engine:set(NewSt4, update_seq, FinalUpdateSeq),
+    {ok, NewSt5} = couch_bt_engine:set(NewSt4, update_seq, CurrUpdateSeq),
     commit_compaction_data(NewSt5).
 
 
@@ -229,10 +235,11 @@ copy_docs(St, #st{} = NewSt, MixedInfos, Retry) ->
     end, NewInfos0),
 
     Limit = couch_bt_engine:get(St, revs_limit),
-    NewInfos = lists:map(fun(FDI) ->
-        FDI#full_doc_info{
+    {NewInfos, HighSeq} = lists:mapfoldl(fun({FDI, MaxSeq}) ->
+        NewFDI = FDI#full_doc_info{
             rev_tree = couch_key_tree:stem(FDI#full_doc_info.rev_tree, Limit)
-        }
+        },
+        {NewFDI, erlang:max(MaxSeq, NewFDI#full_doc_info.update_seq)}
     end, NewInfos1),
 
     RemoveSeqs =
@@ -256,7 +263,7 @@ copy_docs(St, #st{} = NewSt, MixedInfos, Retry) ->
         {{Id, Seq}, FDI}
     end, NewInfos),
     {ok, IdEms} = couch_emsort:add(NewSt#st.id_tree, FDIKVs),
-    update_compact_task(length(NewInfos)),
+    update_compact_task(HighSeq, length(NewInfos)),
     NewSt#st{id_tree=IdEms, seq_tree=SeqTree}.
 
 
@@ -464,14 +471,16 @@ next_info(Iter, {Id, Seq, FDI}, Seqs) ->
     end.
 
 
-update_compact_task(NumChanges) ->
-    [Changes, Total] = couch_task_status:get([changes_done, total_changes]),
-    Changes2 = Changes + NumChanges,
-    Progress = case Total of
-    0 ->
-        0;
-    _ ->
-        (Changes2 * 100) div Total
+update_compact_task(HighSeq, BatchSize) ->
+    Props = [start_seq, total_changes, changes_done],
+    [StartSeq, TotalChanges, ChangesDone] = couch_task_status:get(Props),
+    Progress = case TotalChanges of
+        0 -> 0;
+        _ -> ((HighSeq - StartSeq) * 100) div TotalChanges
     end,
-    couch_task_status:update([{changes_done, Changes2}, {progress, Progress}]).
+    couch_task_status:update([
+            {changes_done, ChangesDone + BatchSize},
+            {progress, Progress},
+            {current_seq, HighSeq}
+        ]).
 
