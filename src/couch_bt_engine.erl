@@ -43,6 +43,7 @@
     fold_docs/4,
     fold_local_docs/4,
     fold_changes/5,
+    count_changes_since/2,
 
     start_compaction/4,
     finish_compaction/2,
@@ -388,6 +389,16 @@ fold_changes(St, SinceSeq, UserFun, UserAcc, Options) ->
     {ok, _, OutAcc} = couch_btree:fold(St#st.seq_tree, Fun, InAcc, Opts),
     {_, FinalUserAcc} = OutAcc,
     {ok, FinalUserAcc}.
+
+
+count_changes_since(St, SinceSeq) ->
+    BTree = St#st.seq_tree,
+    FoldFun = fun(_SeqStart, PartialReds, 0) ->
+        {ok, couch_btree:final_reduce(BTree, PartialReds)}
+    end,
+    Opts = [{start_key, SinceSeq + 1}],
+    {ok, Changes} = couch_btree:fold_reduce(BTree, FoldFun, 0, Opts),
+    Changes.
 
 
 start_compaction(St, DbName, Options, Parent) ->

@@ -29,7 +29,7 @@
 -export([get_purge_seq/1,purge_docs/2,get_last_purged/1]).
 -export([start_link/4,open_doc_int/3,ensure_full_commit/1,ensure_full_commit/2]).
 -export([fold_docs/3, fold_docs/4]).
--export([fold_changes/4, fold_changes/5]).
+-export([fold_changes/4, fold_changes/5, count_changes_since/2]).
 -export([set_security/2,get_security/1]).
 -export([changes_since/4,changes_since/5,read_doc/2,new_revid/1]).
 -export([check_is_admin/1, is_admin/1, check_is_member/1, get_doc_count/1]).
@@ -1273,6 +1273,13 @@ fold_changes(Db, StartSeq, UserFun, UserAcc, Opts) ->
     {ok, Acc2} = Engine:fold_changes(EngineState, StartSeq, Fun, Acc1, Opts),
     {_, _, FinalUserAcc} = Acc2,
     {ok, FinalUserAcc}.
+
+
+count_changes_since(Db, SinceSeq) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    Engine:count_changes_since(EngineState, SinceSeq).
 
 
 %%% Internal function %%%
