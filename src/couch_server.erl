@@ -128,9 +128,9 @@ delete(DbName, Options) ->
 
 delete_compaction_files(DbName) when is_list(DbName) ->
     RootDir = config:get("couchdb", "database_dir", "."),
-    lists:foreach(fun({Ext, Module}) ->
+    lists:foreach(fun({Ext, Engine}) ->
         FilePath = make_filepath(RootDir, DbName, Ext),
-        Module:delete_compaction_files(RootDir, FilePath)
+        Engine:delete_compaction_files(RootDir, FilePath)
     end, get_configured_engines()),
     ok;
 delete_compaction_files(DbName) when is_binary(DbName) ->
@@ -492,11 +492,11 @@ handle_call({delete, DbName, Options}, _From, Server) ->
 
         couch_db_plugin:on_delete(DbName, Options),
 
-        {Module, Filepath} = get_engine(Server, DbNameList),
+        {Engine, FilePath} = get_engine(Server, DbNameList),
         Async = not lists:member(sync, Options),
         delete_compaction_files(RootDir, FilePath),
 
-        case Module:delete(Server#server.root_dir, FilePath, Async) of
+        case Engine:delete(Server#server.root_dir, FilePath, Async) of
         ok ->
             couch_event:notify(DbName, deleted),
             {reply, ok, Server2};
@@ -637,11 +637,11 @@ get_engine(Server, DbName) ->
         root_dir = RootDir,
         engines = Engines
     } = Server,
-    Possible = lists:foldl(fun({Extension, Module}, Acc) ->
+    Possible = lists:foldl(fun({Extension, Engine}, Acc) ->
         Path = make_filepath(RootDir, DbName, Extension),
-        case Module:exists(Path) of
+        case Engine:exists(Path) of
             true ->
-                [{Module, Path} | Acc];
+                [{Engine, Path} | Acc];
             false ->
                 Acc
         end
