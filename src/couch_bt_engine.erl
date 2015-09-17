@@ -1,8 +1,12 @@
 -module(couch_bt_engine).
-
+-behavior(couch_db_engine).
 
 -export([
     exists/1,
+
+    delete/3,
+    delete_compaction_files/2,
+
     init/2,
     terminate/2,
     handle_info/2,
@@ -11,16 +15,17 @@
     decref/1,
     monitored_by/1,
 
-    delete/2,
-    delete/3,
+    get/2,
+    get/3,
+    set/3,
 
-    delete_compaction_files/2,
+    get_security/1,
+    get_last_purged/1,
+    get_doc_count/1,
+    get_del_doc_count/1,
+    get_size_info/1,
 
-    sync/1,
-    commit_data/1,
-
-    increment_update_seq/1,
-    store_security/2,
+    set_security/2,
 
     open_docs/2,
     open_local_docs/2,
@@ -30,15 +35,11 @@
     write_doc_summary/2,
     write_doc_infos/4,
 
+    commit_data/1,
+
     open_write_stream/2,
     open_read_stream/2,
     is_active_stream/2,
-
-    get_security/1,
-    get_last_purged/1,
-    get_doc_count/1,
-    get_del_doc_count/1,
-    get_size_info/1,
 
     fold_docs/4,
     fold_local_docs/4,
@@ -46,11 +47,7 @@
     count_changes_since/2,
 
     start_compaction/4,
-    finish_compaction/2,
-
-    get/2,
-    get/3,
-    set/3
+    finish_compaction/2
 ]).
 
 
@@ -84,6 +81,22 @@ exists(FilePath) ->
         false ->
             filelib:is_file(FilePath ++ ".compact")
     end.
+
+
+delete(RootDir, FilePath, Async) ->
+    %% Delete any leftover compaction files. If we don't do this a
+    %% subsequent request for this DB will try to open them to use
+    %% as a recovery.
+    delete_compaction_files(RootDir, FilePath),
+
+    % Delete the actual database file
+    couch_file:delete(RootDir, FilePath, Async).
+
+
+delete_compaction_files(RootDir, FilePath) ->
+    lists:foreach(fun(Ext) ->
+        couch_file:delete(RootDir, FilePath ++ Ext)
+    end, [".compact", ".compact.data", ".compact.meta"]).
 
 
 init(FilePath, Options) ->
@@ -147,58 +160,6 @@ monitored_by(St) ->
     end.
 
 
-delete(St, RootDir) ->
-    delete(RootDir, St#st.filepath).
-
-
-delete(RootDir, FilePath, Async) ->
-    %% Delete any leftover compaction files. If we don't do this a
-    %% subsequent request for this DB will try to open them to use
-    %% as a recovery.
-    delete_compaction_files(RootDir, FilePath),
-
-    % Delete the actual database file
-    couch_file:delete(RootDir, FilePath, Async).
-
-
-delete_compaction_files(RootDir, FilePath) ->
-    lists:foreach(fun(Ext) ->
-        couch_file:delete(RootDir, FilePath ++ Ext)
-    end, [".compact", ".compact.data", ".compact.meta"]).
-
-
-sync(#st{fd = Fd}) ->
-    ok = couch_file:sync(Fd).
-
-
-commit_data(St) ->
-    #st{
-        fd = Fd,
-        fsync_options = FsyncOptions,
-        header = OldHeader,
-        needs_commit = NeedsCommit
-    } = St,
-
-    NewHeader = update_header(St, OldHeader),
-
-    case NewHeader /= OldHeader orelse NeedsCommit of
-        true ->
-            Before = lists:member(before_header, FsyncOptions),
-            After = lists:member(after_header, FsyncOptions),
-
-            if Before -> couch_file:sync(Fd); true -> ok end,
-            ok = couch_file:write_header(Fd, NewHeader),
-            if After -> couch_file:sync(Fd); true -> ok end,
-
-            St#st{
-                header = NewHeader,
-                needs_commit = false
-            };
-        false ->
-            St
-    end.
-
-
 get(#st{} = St, DbProp) ->
     ?MODULE:get(St, DbProp, undefined).
 
@@ -209,20 +170,66 @@ get(#st{header = Header}, DbProp, Default) ->
 
 set(#st{} = St, DbProp, Value) ->
     #st{
-        header = Header
+        header = Header,
+        update_seq = UpdateSeq
     } = St,
     {ok, St#st{
         header = couch_bt_engine_header:set(Header, DbProp, Value),
+        update_seq = UpdateSeq + 1,
         needs_commit = true
     }}.
 
 
-increment_update_seq(#st{} = St) ->
-    Current = ?MODULE:get(St, update_seq),
-    ?MODULE:set(St, update_seq, Current + 1).
+get_last_purged(#st{} = St) ->
+    case ?MODULE:get(St, purged_docs, nil) of
+        nil ->
+            {ok, []};
+        Pointer ->
+            couch_file:pread_term(St#st.fd, Pointer)
+    end.
 
 
-store_security(#st{} = St, NewSecurity) ->
+get_doc_count(#st{} = St) ->
+    {ok, {Count, _, _}} = couch_btree:full_reduce(St#st.id_tree),
+    Count.
+
+
+get_del_doc_count(#st{} = St) ->
+    {ok, {_, DelCount, _}} = couch_btree:full_reduce(St#st.id_tree),
+    DelCount.
+
+
+get_size_info(#st{} = St) ->
+    {ok, FileSize} = couch_file:bytes(St#st.fd),
+    {ok, DbReduction} = couch_btree:full_reduce(St#st.id_tree),
+    SizeInfo0 = element(3, DbReduction),
+    SizeInfo = case SizeInfo0 of
+        SI when is_record(SI, size_info) ->
+            SI;
+        {AS, ES} ->
+            #size_info{active=AS, external=ES};
+        AS ->
+            #size_info{active=AS}
+    end,
+    ActiveSize = active_size(St, SizeInfo),
+    ExternalSize = SizeInfo#size_info.external,
+    [
+        {active, ActiveSize},
+        {external, ExternalSize},
+        {file, FileSize}
+    ].
+
+
+get_security(#st{} = St) ->
+    case ?MODULE:get(St, security_ptr, nil) of
+        nil ->
+            {ok, []};
+        Pointer ->
+            couch_file:pread_term(St#st.fd, Pointer)
+    end.
+
+
+set_security(#st{} = St, NewSecurity) ->
     Options = [{compression, St#st.compression}],
     {ok, Ptr, _} = couch_file:append_term(St#st.fd, NewSecurity, Options),
     set(St, security_ptr, Ptr).
@@ -270,7 +277,7 @@ write_doc_summary(St, SummaryBinary) ->
     couch_file:append_raw_chunk(Fd, SummaryBinary).
 
 
-write_doc_infos(#st{} = St, Pairs, RemoveSeqs, LocalDocs) ->
+write_doc_infos(#st{} = St, Pairs, LocalDocs, PurgedIdRevs) ->
     #st{
         id_tree = IdTree,
         seq_tree = SeqTree,
@@ -294,6 +301,34 @@ write_doc_infos(#st{} = St, Pairs, RemoveSeqs, LocalDocs) ->
     }}.
 
 
+commit_data(St) ->
+    #st{
+        fd = Fd,
+        fsync_options = FsyncOptions,
+        header = OldHeader,
+        needs_commit = NeedsCommit
+    } = St,
+
+    NewHeader = update_header(St, OldHeader),
+
+    case NewHeader /= OldHeader orelse NeedsCommit of
+        true ->
+            Before = lists:member(before_header, FsyncOptions),
+            After = lists:member(after_header, FsyncOptions),
+
+            if Before -> couch_file:sync(Fd); true -> ok end,
+            ok = couch_file:write_header(Fd, NewHeader),
+            if After -> couch_file:sync(Fd); true -> ok end,
+
+            St#st{
+                header = NewHeader,
+                needs_commit = false
+            };
+        false ->
+            St
+    end.
+
+
 open_write_stream(#st{} = St, Options) ->
     couch_stream:open({couch_bt_engine_stream, {St#st.fd, []}}, Options).
 
@@ -306,55 +341,6 @@ is_active_stream(#st{} = St, {couch_bt_engine_stream, {Fd, _}}) ->
     St#st.fd == Fd;
 is_active_stream(_, _) ->
     false.
-
-
-get_security(#st{} = St) ->
-    case ?MODULE:get(St, security_ptr, nil) of
-        nil ->
-            {ok, []};
-        Pointer ->
-            couch_file:pread_term(St#st.fd, Pointer)
-    end.
-
-
-get_last_purged(#st{} = St) ->
-    case ?MODULE:get(St, purged_docs, nil) of
-        nil ->
-            {ok, []};
-        Pointer ->
-            couch_file:pread_term(St#st.fd, Pointer)
-    end.
-
-
-get_doc_count(#st{} = St) ->
-    {ok, {Count, _, _}} = couch_btree:full_reduce(St#st.id_tree),
-    Count.
-
-
-get_del_doc_count(#st{} = St) ->
-    {ok, {_, DelCount, _}} = couch_btree:full_reduce(St#st.id_tree),
-    DelCount.
-
-
-get_size_info(#st{} = St) ->
-    {ok, FileSize} = couch_file:bytes(St#st.fd),
-    {ok, DbReduction} = couch_btree:full_reduce(St#st.id_tree),
-    SizeInfo0 = element(3, DbReduction),
-    SizeInfo = case SizeInfo0 of
-        SI when is_record(SI, size_info) ->
-            SI;
-        {AS, ES} ->
-            #size_info{active=AS, external=ES};
-        AS ->
-            #size_info{active=AS}
-    end,
-    ActiveSize = active_size(St, SizeInfo),
-    ExternalSize = SizeInfo#size_info.external,
-    [
-        {active, ActiveSize},
-        {external, ExternalSize},
-        {file, FileSize}
-    ].
 
 
 fold_docs(St, UserFun, UserAcc, Options) ->
