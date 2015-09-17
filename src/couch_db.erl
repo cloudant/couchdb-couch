@@ -97,28 +97,18 @@ reopen(#db{} = Db) ->
     % We could have just swapped out the storage engine
     % for this database during a compaction so we just
     % reimplement this as a close/open pair now.
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    ok = Engine:decref(EngineState),
+    close(Db),
     open(Db#db.name, [{user_ctx, Db#db.user_ctx} | Db#db.options]).
 
 
 % You shouldn't call this. Its part of the ref counting between
 % couch_server and couch_db instances.
 incref(#db{} = Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    {ok, NewState} = Engine:incref(EngineState),
-    {ok, Db#db{engine = {Engine, NewState}}}.
+    couch_db_engine:incref(Db).
 
 
 close(#db{} = Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    ok = Engine:decref(EngineState).
+    ok = couch_db_engine:decref(Db).
 
 shutdown(#db{} = Db) ->
     couch_util:shutdown_sync(Db#db.main_pid).
@@ -152,10 +142,7 @@ is_idle(_Db) ->
     false.
 
 monitored_by(Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    case Engine:monitored_by(EngineState) of
+    case couch_db_engine:monitored_by(Db) of
         Pids when is_list(Pids) ->
             PidTracker = whereis(couch_stats_process_tracker),
             Pids -- [Db#db.main_pid, PidTracker];
@@ -234,10 +221,7 @@ open_docs(Db, Id) ->
 open_docs(Db, Ids, _Options) ->
     % TODO: Add support for returning other
     % types of docs beyond #full_doc_info{}
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:open_docs(EngineState, Ids).
+    couch_db_engine:open_docs(Db, Ids).
 
 apply_open_options({ok, Doc},Options) ->
     apply_open_options2(Doc,Options);
@@ -328,10 +312,7 @@ get_full_doc_info(Db, Id) ->
     Result.
 
 get_full_doc_infos(Db, Ids) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:open_docs(EngineState, Ids).
+    couch_db_engine:open_docs(EngineState, Ids).
 
 purge_docs(#db{main_pid=Pid}, IdsRevs) ->
     gen_server:call(Pid, {purge_docs, IdsRevs}).
@@ -356,22 +337,13 @@ get_purge_seq(#db{}=Db) ->
     get_prop(Db, purge_seq).
 
 get_last_purged(#db{}=Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:get_last_purged(EngineState).
+    couch_db_engine:get_last_purged(Db).
 
 get_doc_count(Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:get_doc_count(EngineState).
+    couch_db_engine:get_doc_count(Db).
 
 get_del_doc_count(Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:get_del_doc_count(EngineState).
+    couch_db_engine:get_del_doc_count(Db).
 
 get_uuid(#db{}=Db) ->
     get_prop(Db, uuid).
@@ -388,14 +360,13 @@ get_instance_start_time(#db{}=Db) ->
 get_db_info(Db) ->
     #db{
         name = Name,
-        engine = {Engine, EngineState},
         compactor_pid = Compactor,
         instance_start_time = StartTime,
         committed_update_seq=CommittedUpdateSeq
     } = Db,
     DocCount = get_doc_count(Db),
     DelDocCount = get_del_doc_count(Db),
-    SizeInfo = Engine:get_size_info(EngineState),
+    SizeInfo = couch_db_engine:get_size_info(Db),
     DiskVersion = get_prop(Db, disk_version),
     Uuid = case get_uuid(Db) of
         undefined -> null;
@@ -407,7 +378,7 @@ get_db_info(Db) ->
     end,
     InfoList = [
         {db_name, Name},
-        {engine, Engine},
+        {engine, couch_db_engine:get_engine(Db)},
         {doc_count, DocCount},
         {doc_del_count, DelDocCount},
         {update_seq, get_update_seq(Db)},
@@ -541,10 +512,7 @@ validate_names_and_roles({Props}) when is_list(Props) ->
     ok.
 
 get_revs_limit(#db{} = Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:get(EngineState, revs_limit).
+    couch_db_engine:get(Db, revs_limit).
 
 set_revs_limit(#db{main_pid=Pid}=Db, Limit) when Limit > 0 ->
     check_is_admin(Db),
@@ -1225,24 +1193,15 @@ with_stream(Db, Att, Fun) ->
 
 
 open_write_stream(Db, Options) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:open_write_stream(EngineState, Options).
+    couch_db_engine:open_write_stream(Db, Options).
 
 
 open_read_stream(Db, AttState) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:open_read_stream(EngineState, AttState).
+    couch_db_engine:open_read_stream(Db, AttState).
 
 
 is_active_stream(Db, StreamEngine) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:is_active_stream(EngineState, StreamEngine).
+    couch_db_engine:is_active_stream(Db, StreamEngine).
 
 
 fold_docs(Db, Fun, Acc) ->
@@ -1265,75 +1224,58 @@ fold_changes(Db, StartSeq, Fun, Acc) ->
 
 
 fold_changes(Db, StartSeq, UserFun, UserAcc, Opts) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
     Fun = get_doc_type_conv(Opts),
     Acc1 = {Db, UserFun, UserAcc},
-    {ok, Acc2} = Engine:fold_changes(EngineState, StartSeq, Fun, Acc1, Opts),
+    {ok, Acc2} = couch_db_engine:fold_changes(Db, StartSeq, Fun, Acc1, Opts),
     {_, _, FinalUserAcc} = Acc2,
     {ok, FinalUserAcc}.
 
 
 count_changes_since(Db, SinceSeq) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:count_changes_since(EngineState, SinceSeq).
+    couch_db_engine:count_changes_since(Db, SinceSeq).
 
 
 %%% Internal function %%%
 
 fold_all_docs(Db, UserFun, UserAcc, Options) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-
     % FIXME: THIS IS A HUGE HACK
     % We'll have to figure out a different implementation
     % for the _all_docs handler which is the only thing that
     % uses include_reductions.
     case lists:member(include_reductions, Options) of
         true ->
-            Engine:fold_docs(EngineState, UserFun, UserAcc, Options);
+            couch_db_engine:fold_docs(Db, UserFun, UserAcc, Options);
         false ->
             Fun = get_doc_type_conv(Options),
             Acc1 = {Db, UserFun, UserAcc},
-            {ok, Acc2} = Engine:fold_docs(EngineState, Fun, Acc1, Options),
+            {ok, Acc2} = couch_db_engine:fold_docs(Db, Fun, Acc1, Options),
             {_, _, FinalUserAcc} = Acc2,
             {ok, FinalUserAcc}
     end.
 
 
 fold_design_docs(Db, UserFun, UserAcc, Options1) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-
     Options2 = set_design_doc_keys(Options1),
 
     % FIXME: Same as above. couch_mrview is doing
     % terribleness here.
     case lists:member(include_reductions, Options2) of
         true ->
-            Engine:fold_docs(EngineState, UserFun, UserAcc, Options2);
+            couch_db_engine:fold_docs(Db, UserFun, UserAcc, Options2);
         false ->
             Fun1 = get_doc_type_conv(Options1),
             Fun2 = fun only_ddoc_fold/2,
             Acc1 = {Fun1, {Db, UserFun, UserAcc}},
-            {ok, Acc2} = Engine:fold_docs(EngineState, Fun2, Acc1, Options2),
+            {ok, Acc2} = couch_db_engine:fold_docs(Db, Fun2, Acc1, Options2),
             {_, {_, _, FinalUserAcc}} = Acc2,
             {ok, FinalUserAcc}
     end.
 
 
 fold_local_docs(Db, UserFun, UserAcc, Options) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
     Fun = get_doc_type_conv(Options),
     Acc1 = {Fun, {Db, UserFun, UserAcc}},
-    {ok, Acc2} = Engine:fold_local_docs(EngineState, Fun, Acc1, Options),
+    {ok, Acc2} = couch_db_engine:fold_local_docs(Db, Fun, Acc1, Options),
     {_, {_, _, FinalUserAcc}} = Acc2,
     {ok, FinalUserAcc}.
 
@@ -1378,10 +1320,7 @@ open_doc_revs_int(Db, IdRevs, Options) ->
         IdRevs, LookupResults).
 
 open_doc_int(Db, <<?LOCAL_DOC_PREFIX, _/binary>> = Id, Options) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    case Engine:open_local_docs(EngineState, [Id]) of
+    case couch_db_engine:open_local_docs(Db, [Id]) of
     [#doc{} = Doc] ->
         apply_open_options({ok, Doc}, Options);
     [not_found] ->
@@ -1448,10 +1387,7 @@ doc_meta_info(#doc_info{high_seq=Seq,revs=[#rev_info{rev=Rev}|RestInfo]}, RevTre
     end.
 
 read_doc(#db{} = Db, Ptr) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:read_doc(EngineState, Ptr).
+    couch_db_engine:read_doc(Db, Ptr).
 
 
 make_doc(_Db, Id, Deleted, nil = _Bp, RevisionPath) ->
@@ -1538,10 +1474,7 @@ get_prop(Db, Key) ->
 
 
 get_prop(Db, Key, Default) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:get(EngineState, Key, Default).
+    couch_db_engine:get(Db, Key, Default).
 
 
 get_doc_type_conv(Options) ->

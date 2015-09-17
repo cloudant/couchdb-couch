@@ -25,12 +25,8 @@
 init({Engine, DbName, FilePath, Options}) ->
     erlang:put(io_priority, {db_update, DbName}),
     try
-        Db = case Engine:init(FilePath, Options) of
-            {ok, EngineState} ->
-                init_db(DbName, Engine, EngineState, Options);
-            Error ->
-                throw(Error)
-        end,
+        {ok, EngineState} = couch_db_engine:init(Engine, FilePath, Options),
+        Db = init_db(DbName, EngineState, Options),
         maybe_track_db(Db),
         % we don't load validation funs here because the fabric query is liable to
         % race conditions.  Instead see couch_db:validate_doc_update, which loads
@@ -47,8 +43,7 @@ init({Engine, DbName, FilePath, Options}) ->
 terminate(Reason, Db) ->
     couch_log:error("STOPPING DB: ~s", [Db#db.name]),
     couch_util:shutdown_sync(Db#db.compactor_pid),
-    {Engine, EngineState} = Db#db.engine,
-    Engine:terminate(Reason, EngineState),
+    couch_db_engine:terminate(Reason, Db),
     ok.
 
 handle_call(get_db, _From, Db) ->
@@ -78,29 +73,12 @@ handle_call(cancel_compact, _From, #db{compactor_pid = Pid} = Db) ->
     {reply, ok, Db2};
 
 handle_call({set_security, NewSec}, _From, #db{} = Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    {ok, NewState1} = Engine:store_security(EngineState, NewSec),
-    {ok, NewState2} = Engine:increment_update_seq(NewState1),
-    {ok, NewState3} = Engine:commit_data(NewState2),
-    Db2 = Db#db{
-        engine = {Engine, NewState3},
-        security = NewSec
-    },
+    {ok, NewDb} = couch_db_engine:set_security(Db, NewSec),
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
     {reply, ok, Db2};
 
 handle_call({set_revs_limit, Limit}, _From, Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    {ok, NewState1} = Engine:set(EngineState, revs_limit, Limit),
-    {ok, NewState2} = Engine:increment_update_seq(NewState1),
-    {ok, NewState3} = Engine:commit_data(NewState2),
-    Db2 = Db#db{
-        engine = {Engine, NewState3}
-    },
+    {ok, Db2} = couch_db_engine:set(Db, revs_limit, Limit),
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
     {reply, ok, Db2};
 
@@ -108,12 +86,8 @@ handle_call({purge_docs, _IdRevs}, _From,
         #db{compactor_pid=Pid}=Db) when Pid /= nil ->
     {reply, {error, purge_during_compaction}, Db};
 handle_call({purge_docs, IdRevs}, _From, Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-
     DocIds = [Id || {Id, _Revs} <- IdRevs],
-    OldDocInfos = Engine:open_docs(EngineState, DocIds),
+    OldDocInfos = couch_db_engine:open_docs(Db, DocIds),
 
     NewDocInfos = lists:flatmap(fun
         ({{_Id, Revs}, #full_doc_info{rev_tree = Tree} = FDI}) ->
@@ -128,7 +102,8 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
             []
     end, lists:zip(IdRevs, OldDocInfos)),
 
-    InitAcc = {Engine:get(EngineState, update_seq), [], [], []},
+    InitUpdateSeq = couch_db_engine:get(Db, update_seq),
+    InitAcc = {InitUpdateSeq, [], [], []},
     FinalAcc = lists:foldl(fun({#full_doc_info{} = OldFDI, RemRevs}, Acc) ->
         #full_doc_info{
             id = Id,
@@ -170,21 +145,14 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
 
     {FinalSeq, FDIs, RemSeqs, PurgedIdRevs} = FinalAcc,
 
-    PurgePairs = pair_purge_info(OldDocInfos, FDIs),
+    Pairs = pair_purge_info(OldDocInfos, FDIs),
 
-    {ok, NewState1} = Engine:set(EngineState, update_seq, FinalSeq + 1),
-    {ok, NewState2} = Engine:update_docs(NewState1, PurgePairs, RemSeqs),
-    {ok, NewState3} = Engine:store_purged(NewState2, PurgedIdRevs),
-    {ok, NewState4} = Engine:commit_data(NewState3),
-
-    Db2 = Db#db{
-        engine = {Engine, NewState4}
-    },
+    {ok, Db2} = couch_db_engine:write_doc_infos(Db, Pairs, [], PurgedIdRevs),
 
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
     couch_event:notify(Db#db.name, updated),
 
-    PurgeSeq = Engine:get(NewState4, purge_seq),
+    PurgeSeq = couch_db_engine:get(Db2, purge_seq),
     {reply, {ok, PurgeSeq, PurgedIdRevs}, Db2}.
 
 
@@ -200,10 +168,7 @@ handle_cast(start_compact, Db) ->
             % we'll add a field that sets the target engine
             % type to compact to with a new copy compactor.
             couch_log:info("Starting compaction for db \"~s\"", [Db#db.name]),
-            {Engine, EngineState} = Db#db.engine,
-            Pid = Engine:start_compaction(
-                    EngineState, Db#db.name, Db#db.options, self()),
-            Db2 = Db#db{compactor_pid = Pid},
+            {ok, Db2} = couch_db_engine:start_compaction(Db),
             ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
             {noreply, Db2};
         _ ->
@@ -211,10 +176,10 @@ handle_cast(start_compact, Db) ->
             {noreply, Db}
     end;
 handle_cast({compact_done, CompactEngine, CompactFilePath}, #db{} = OldDb) ->
-    NewDb = case OldDb#db.engine of
-        {CompactEngine, _} ->
-            finish_engine_compaction(OldDb, CompactFilePath);
-        {_DifferentEngine, _} ->
+    NewDb = case couch_db_engine:get_engine(Db, CompactEngine) of
+        CompactEngine ->
+            couch_db_engine:finish_compaction(OldDb, CompactFilePath);
+        _ ->
             finish_engine_swap(OldDb, CompactEngine, CompactFilePath)
     end,
     {noreply, NewDb};
@@ -283,19 +248,7 @@ handle_info({'EXIT', _Pid, normal}, Db) ->
 handle_info({'EXIT', _Pid, Reason}, Db) ->
     {stop, Reason, Db};
 handle_info(Msg, Db) ->
-    #db{
-        name = Name,
-        engine = {Engine, EngineState}
-    } = Db,
-    case Engine:handle_info(Msg, EngineState) of
-        {noreply, NewState} ->
-            {noreply, Db#db{engine = {Engine, NewState}}};
-        {noreply, NewState, Timeout} ->
-            {noreply, Db#db{engine = {Engine, NewState}}, Timeout};
-        {stop, Reason, NewState} ->
-            couch_log:error("DB ~s shutting down: ~p", [Name, Msg]),
-            {stop, Reason, Db#db{engine = {Engine, NewState}}}
-    end.
+    couch_db_engine:handle_info(Msg, Db).
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -347,13 +300,11 @@ collect_updates(GroupedDocsAcc, ClientsAcc, MergeConflicts, FullCommit) ->
     end.
 
 
-init_db(DbName, Engine, EngineState, Options) ->
+init_db(DbName, EngineState, Options) ->
     % convert start time tuple to microsecs and store as a binary string
     {MegaSecs, Secs, MicroSecs} = os:timestamp(),
     StartTime = ?l2b(io_lib:format("~p",
             [(MegaSecs*1000000*1000000) + (Secs*1000000) + MicroSecs])),
-
-    {ok, SecProps} = Engine:get_security(EngineState),
 
     BDU = couch_util:get_value(before_doc_update, Options, nil),
     ADR = couch_util:get_value(after_doc_read, Options, nil),
@@ -363,15 +314,19 @@ init_db(DbName, Engine, EngineState, Options) ->
         (Else, Acc) -> [Else | Acc]
     end, [], Options),
 
-    #db{
+    InitDb = #db{
         name = DbName,
-        engine = {Engine, EngineState},
-        committed_update_seq = Engine:get(EngineState, update_seq),
-        security = SecProps,
+        engine = EngineState,
         instance_start_time = StartTime,
         options = CleanedOptions,
         before_doc_update = BDU,
         after_doc_read = ADR
+    },
+
+    {ok, SecProps} = couch_db_engine:get_security(InitDb),
+    InitDb#db{
+        committed_update_seq = couch_db_engine:get(Db, update_seq),
+        security = SecProps
     }.
 
 
@@ -398,9 +353,6 @@ flush_trees(_Db, [], AccFlushedTrees) ->
     {ok, lists:reverse(AccFlushedTrees)};
 flush_trees(#db{} = Db,
         [InfoUnflushed | RestUnflushed], AccFlushed) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
     #full_doc_info{update_seq=UpdateSeq, rev_tree=Unflushed} = InfoUnflushed,
     {Flushed, FinalAcc} = couch_key_tree:mapfold(
         fun(_Rev, Value, Type, SizesAcc) ->
@@ -429,7 +381,7 @@ flush_trees(#db{} = Db,
                 end,
                 ExternalSize = ?term_size(Summary),
                 {ok, NewSummaryPointer, SummarySize} =
-                    Engine:write_doc_summary(EngineState, Summary),
+                    couch_db_engine:write_doc_summary(Db, Summary),
                 Leaf = #leaf{
                     deleted = IsDeleted,
                     ptr = NewSummaryPointer,
@@ -605,17 +557,13 @@ merge_rev_tree(OldInfo, NewDoc, _Client, Limit, true) ->
     {NewTree, _} = couch_key_tree:merge(OldTree, NewTree0, Limit),
     OldInfo#full_doc_info{rev_tree = NewTree}.
 
-update_docs_int(Db, DocsList, NonRepDocs, MergeConflicts, FullCommit) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-
-    UpdateSeq = Engine:get(EngineState, update_seq),
-    RevsLimit = Engine:get(EngineState, revs_limit),
+update_docs_int(Db, DocsList, LocalDocs, MergeConflicts, FullCommit) ->
+    UpdateSeq = couch_db_engine:get(Db, update_seq),
+    RevsLimit = couch_db_engine:get(Db, revs_limit),
 
     Ids = [Id || [{_Client, #doc{id=Id}}|_] <- DocsList],
     % lookup up the old documents, if they exist.
-    OldDocLookups = Engine:open_docs(EngineState, Ids),
+    OldDocLookups = couch_db_engine:open_docs(Db, Ids),
     OldDocInfos = lists:zipwith(fun
         (_Id, #full_doc_info{} = FDI) ->
             FDI;
@@ -632,15 +580,9 @@ update_docs_int(Db, DocsList, NonRepDocs, MergeConflicts, FullCommit) ->
 
     WritePairs = pair_write_info(OldDocLookups, IndexFDIs),
 
-    NewNonRepDocs = update_local_doc_revs(NonRepDocs),
+    LocalDocs2 = update_local_doc_revs(LocalDocs),
 
-    {ok, NewState1} = Engine:write_doc_infos(
-            EngineState, WritePairs, RemSeqs, NewNonRepDocs),
-    {ok, NewState2} = Engine:set(NewState1, update_seq, NewSeq),
-
-    Db2 = Db#db{
-        engine = {Engine, NewState2}
-    },
+    {ok, Db1} = couch_db_engine:write_doc_infos(Db, Pairs, LocalDocs2, []),
 
     WriteCount = length(IndexFDIs),
     couch_stats:increment_counter([couchdb, document_inserts],
@@ -658,16 +600,16 @@ update_docs_int(Db, DocsList, NonRepDocs, MergeConflicts, FullCommit) ->
         (_) -> []
     end, Ids),
 
-    Db3 = case length(UpdatedDDocIds) > 0 of
+    Db2 = case length(UpdatedDDocIds) > 0 of
         true ->
-            couch_event:notify(Db2#db.name, ddoc_updated),
-            ddoc_cache:evict(Db2#db.name, UpdatedDDocIds),
-            refresh_validate_doc_funs(Db2);
+            couch_event:notify(Db1#db.name, ddoc_updated),
+            ddoc_cache:evict(Db1#db.name, UpdatedDDocIds),
+            refresh_validate_doc_funs(Db1);
         false ->
-            Db2
+            Db1
     end,
 
-    {ok, commit_data(Db3, not FullCommit), UpdatedDDocIds}.
+    {ok, commit_data(Db2, not FullCommit), UpdatedDDocIds}.
 
 
 update_local_doc_revs(Docs) ->
@@ -705,15 +647,13 @@ commit_data(Db, true) ->
     Db;
 commit_data(Db, _) ->
     #db{
-        engine = {Engine, EngineState},
         waiting_delayed_commit = Timer
     } = Db,
     if is_reference(Timer) -> erlang:cancel_timer(Timer); true -> ok end,
-    NewState = Engine:commit_data(EngineState),
-    Db#db{
-        engine = {Engine, NewState},
+    {ok, Db1} = couch_db_engine:commit_data(Db),
+    Db1#db{
         waiting_delayed_commit = nil,
-        committed_update_seq = Engine:get(NewState, update_seq)
+        commited_update_seq = couch_db_engine:get(Db, update_seq)
     }.
 
 
@@ -727,44 +667,7 @@ maybe_track_db(#db{options = Options}) ->
 
 
 get_update_seq(Db) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:get(EngineState, update_seq).
-
-
-finish_engine_compaction(OldDb, CompactFilePath) ->
-    #db{
-        engine = {Engine, OldState}
-    } = OldDb,
-    {ok, NewState1} = Engine:init(CompactFilePath, OldDb#db.options),
-    OldSeq = Engine:get(OldState, update_seq),
-    NewSeq = Engine:get(NewState1, update_seq),
-    case OldSeq == NewSeq of
-        true ->
-            {ok, NewState2} = Engine:finish_compaction(OldState, NewState1),
-            NewDb1 = OldDb#db{
-                engine = {Engine, NewState2},
-                compactor_pid = nil
-            },
-            NewDb2 = refresh_validate_doc_funs(NewDb1),
-            ok = gen_server:call(couch_server, {db_updated, NewDb2}, infinity),
-            couch_event:notify(NewDb2#db.name, compacted),
-            Arg = [NewDb2#db.name],
-            couch_log:info("Compaction for db \"~s\" completed.", Arg),
-            NewDb2;
-        false ->
-            ok = Engine:decref(NewState1),
-            NewDb = OldDb#db{
-                compactor_pid = Engine:start_compaction(
-                        OldState, OldDb#db.name, OldDb#db.options, self())
-            },
-            couch_log:info("Compaction file still behind main file "
-                           "(update seq=~p. compact update seq=~p). Retrying.",
-                           [OldSeq, NewSeq]),
-            ok = gen_server:call(couch_server, {db_updated, NewDb}, infinity),
-            NewDb
-    end.
+    couch_db_engine:get(Db, update_seq).
 
 
 finish_engine_swap(OldDb, NewEngine, CompactFilePath) ->
@@ -772,10 +675,7 @@ finish_engine_swap(OldDb, NewEngine, CompactFilePath) ->
 
 
 make_doc_summary(Db, DocParts) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:make_doc_summary(EngineState, DocParts).
+    couch_db_engine:make_doc_summary(Db, DocParts).
 
 
 pair_write_info(Old, New) ->
