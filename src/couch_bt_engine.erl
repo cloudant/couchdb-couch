@@ -271,21 +271,45 @@ write_doc_infos(#st{} = St, Pairs, LocalDocs, PurgedIdRevs) ->
         seq_tree = SeqTree,
         local_tree = LocalTree
     } = St,
-    {Write, Remove} = lists:foldl(fun({OldFDI, NewFDI}, {WriteAcc, RemAcc}) ->
+    FinalAcc = lists:foldl(fun({OldFDI, NewFDI}, Acc) ->
+        {AddAcc, RemIdsAcc, RemSeqsAcc} = Acc,
         case {OldFDI, NewFDI} of
-            {_, #full_doc_info{}} ->
-                {[NewFDI | WriteAcc], RemAcc};
+            {not_found, #full_doc_info{}} ->
+                {[NewFDI | AddAcc], RemIdsAcc, RemSeqsAcc};
+            {#full_doc_info{id = Id}, #full_doc_info{id = Id}} ->
+                NewAddAcc = [NewFDI | AddAcc],
+                NewRemSeqsAcc = [OldFDI#full_doc_info.update_seq | RemSeqsAcc],
+                {NewAddAcc, RemIdsAcc, NewRemSeqsAcc};
             {#full_doc_info{id = Id}, not_found} ->
-                {WriteAcc, [Id | RemAcc]}
+                NewRemIdsAcc = [Id | RemIdsAcc],
+                NewRemSeqsAcc = [OldFDI#full_doc_info.update_seq | RemSeqsAcc],
+                {AddAcc, NewRemIdsAcc, NewRemSeqsAcc}
         end
-    end, {[], []}, Pairs),    
-    {ok, IdTree2} = couch_btree:add_remove(IdTree, Write, Remove),
-    {ok, SeqTree2} = couch_btree:add_remove(SeqTree, FullDocInfos, RemoveSeqs),
+    end, {[], [], []}, Pairs),
+
+    {Add, RemIds, RemSeqs} = FinalAcc,
+    {ok, IdTree2} = couch_btree:add_remove(IdTree, Add, RemIds),
+    {ok, SeqTree2} = couch_btree:add_remove(SeqTree, Add, RemSeqs),
     {ok, LocalTree2} = couch_btree:add_remove(LocalTree, LocalDocs, []),
+
+    NewHeader = case PurgedIdRevs of
+        [] ->
+            St#st.header;
+        Else ->
+            {ok, Ptr} = couch_file:append_term(St#st.fd, IdRevsPurged),
+            OldPurgeSeq = couch_bt_engine_header:get(St#st.header, purge_seq),
+            couch_bt_engine_header:set(St#st.header, [
+                {purge_seq, OldPurgeSeq + 1},
+                {purged_docs, Ptr}
+            ])
+    end,
+
     {ok, St#st{
+        header = NewHeader,
         id_tree = IdTree2,
         seq_tree = SeqTree2,
-        local_tree = LocalTree2
+        local_tree = LocalTree2,
+        needs_commit = true
     }}.
 
 

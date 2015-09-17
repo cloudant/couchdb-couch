@@ -90,13 +90,13 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
     OldDocInfos = couch_db_engine:open_docs(Db, DocIds),
 
     NewDocInfos = lists:flatmap(fun
-        ({{_Id, Revs}, #full_doc_info{rev_tree = Tree} = FDI}) ->
+        ({{Id, Revs}, #full_doc_info{id = Id, rev_tree = Tree} = FDI}) ->
             case couch_key_tree:remove_leafs(Tree, Revs) of
                 {_, [] = _RemovedRevs} -> % no change
                     [];
                 {NewTree, RemovedRevs} ->
                     NewFDI = FDI#full_doc_info{rev_tree = NewTree},
-                    [{NewFDI, RemovedRevs}]
+                    [{FDI, NewFDI, RemovedRevs}]
             end;
         ({_, not_found}) ->
             []
@@ -104,7 +104,7 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
 
     InitUpdateSeq = couch_db_engine:get(Db, update_seq),
     InitAcc = {InitUpdateSeq, [], [], []},
-    FinalAcc = lists:foldl(fun({#full_doc_info{} = OldFDI, RemRevs}, Acc) ->
+    FinalAcc = lists:foldl(fun({_, #full_doc_info{} = OldFDI, RemRevs}, Acc) ->
         #full_doc_info{
             id = Id,
             update_seq = RemSeq,
@@ -145,7 +145,10 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
 
     {FinalSeq, FDIs, RemSeqs, PurgedIdRevs} = FinalAcc,
 
-    Pairs = pair_purge_info(OldDocInfos, FDIs),
+    % We need to only use the list of #full_doc_info{} records
+    % that we have actually changed due to a purge.
+    PreviousFDIs = [PrevFDI || {PrevFDI, _, _} <- NewDocInfos],
+    Pairs = pair_purge_info(PreviousFDIs, FDIs),
 
     {ok, Db2} = couch_db_engine:write_doc_infos(Db, Pairs, [], PurgedIdRevs),
 
@@ -683,13 +686,13 @@ pair_write_info(Old, New) ->
             #full_doc_info{} = OldFDI -> {OldFDI, FDI};
             false -> {not_found, FDI}
         end
-    end, MergedFDIs).
+    end, New).
 
 
 pair_purge_info(Old, New) ->
-    lists:map(fun(FDI) ->
+    lists:map(fun(OldFDI) ->
         case lists:keysearch(FDI#full_doc_info.id, #full_doc_info.id, New) of
             #full_doc_info{} = NewFDI -> {OldFDI, NewFDI};
-            false -> {FDI, not_found}
+            false -> {OldFDI, not_found}
         end
     end, Old).
