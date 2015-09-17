@@ -19,14 +19,6 @@
     get/3,
     set/3,
 
-    get_security/1,
-    get_last_purged/1,
-    get_doc_count/1,
-    get_del_doc_count/1,
-    get_size_info/1,
-
-    set_security/2,
-
     open_docs/2,
     open_local_docs/2,
     read_doc/2,
@@ -164,42 +156,24 @@ get(#st{} = St, DbProp) ->
     ?MODULE:get(St, DbProp, undefined).
 
 
-get(#st{header = Header}, DbProp, Default) ->
-    couch_bt_engine_header:get(Header, DbProp, Default).
-
-
-set(#st{} = St, DbProp, Value) ->
-    #st{
-        header = Header,
-        update_seq = UpdateSeq
-    } = St,
-    {ok, St#st{
-        header = couch_bt_engine_header:set(Header, DbProp, Value),
-        update_seq = UpdateSeq + 1,
-        needs_commit = true
-    }}.
-
-
-get_last_purged(#st{} = St) ->
+get(#st{} = St, last_purged, _) ->
     case ?MODULE:get(St, purged_docs, nil) of
         nil ->
-            {ok, []};
+            [];
         Pointer ->
-            couch_file:pread_term(St#st.fd, Pointer)
-    end.
+            {ok, PurgeInfo} = couch_file:pread_term(St#st.fd, Pointer),
+            PurgeInfo
+    end;
 
-
-get_doc_count(#st{} = St) ->
+get(#st{} = St, doc_count, _) ->
     {ok, {Count, _, _}} = couch_btree:full_reduce(St#st.id_tree),
-    Count.
+    Count;
 
-
-get_del_doc_count(#st{} = St) ->
+get(#st{} = St, del_doc_count, _) ->
     {ok, {_, DelCount, _}} = couch_btree:full_reduce(St#st.id_tree),
-    DelCount.
+    DelCount;
 
-
-get_size_info(#st{} = St) ->
+get(#st{} = St, size_info, _) ->
     {ok, FileSize} = couch_file:bytes(St#st.fd),
     {ok, DbReduction} = couch_btree:full_reduce(St#st.id_tree),
     SizeInfo0 = element(3, DbReduction),
@@ -217,22 +191,36 @@ get_size_info(#st{} = St) ->
         {active, ActiveSize},
         {external, ExternalSize},
         {file, FileSize}
-    ].
+    ];
 
-
-get_security(#st{} = St) ->
+get(#st{} = St, security, _) ->
     case ?MODULE:get(St, security_ptr, nil) of
         nil ->
-            {ok, []};
+            [];
         Pointer ->
-            couch_file:pread_term(St#st.fd, Pointer)
-    end.
+            {ok, SecProps} = couch_file:pread_term(St#st.fd, Pointer),
+            SecProps
+    end;
+
+get(#st{header = Header}, DbProp, Default) ->
+    couch_bt_engine_header:get(Header, DbProp, Default).
 
 
-set_security(#st{} = St, NewSecurity) ->
+set(#st{} = St, security, NewSecurity) ->
     Options = [{compression, St#st.compression}],
     {ok, Ptr, _} = couch_file:append_term(St#st.fd, NewSecurity, Options),
-    set(St, security_ptr, Ptr).
+    set(St, security_ptr, Ptr);
+
+set(#st{} = St, DbProp, Value) ->
+    #st{
+        header = Header,
+        update_seq = UpdateSeq
+    } = St,
+    {ok, St#st{
+        header = couch_bt_engine_header:set(Header, DbProp, Value),
+        update_seq = UpdateSeq + 1,
+        needs_commit = true
+    }}.
 
 
 open_docs(#st{} = St, DocIds) ->

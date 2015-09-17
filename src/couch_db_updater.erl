@@ -323,10 +323,9 @@ init_db(DbName, EngineState, Options) ->
         after_doc_read = ADR
     },
 
-    {ok, SecProps} = couch_db_engine:get_security(InitDb),
     InitDb#db{
-        committed_update_seq = couch_db_engine:get(Db, update_seq),
-        security = SecProps
+        committed_update_seq = couch_db_engine:get(InitDb, update_seq),
+        security = couch_db_engine:get(InitDb, security)
     }.
 
 

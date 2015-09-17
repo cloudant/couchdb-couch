@@ -65,30 +65,6 @@
         {ok, NewDbHandle::db_handle()}.
 
 
--callback get_last_purged(DbHandle::db_handle()) ->
-        {ok, DocIdRevs::[{docid(), revs()}]}.
-
-
--callback get_doc_count(DbHandle::db_handle()) ->
-        non_negative_integer().
-
-
--callback get_del_doc_count(DbHandle::db_handle()) ->
-        non_negative_integer().
-
-
--callback get_size_info(DbHandle::db_handle()) ->
-        [{size_name(), non_negative_integer()}].
-
-
--callback get_security(DbHandle::db_handle()) ->
-        {ok, SecProps::any()}.
-
-
--callback set_security(DbHandle::db_handle(), SecProps::any()) ->
-        {ok, NewDbHandle::db_handle()}.
-
-
 -callback open_docs(DbHandle::db_handle(), DocIds::[docid()]) ->
         [#full_doc_info{} | not_found].
 
@@ -200,15 +176,6 @@
     get/3,
     set/3,
 
-    get_engine/1,
-    get_last_purged/1,
-    get_doc_count/1,
-    get_del_doc_count/1,
-    get_size_info/1,
-    get_security/1,
-
-    set_security/2,
-
     open_docs/2,
     open_local_docs/2,
     read_doc/2,
@@ -289,46 +256,18 @@ get(#db{} = Db, Property) ->
     get(Db, Property, undefined).
 
 
+get(#db{} = Db, engine, _) ->
+    #db{
+        engine = {Engine, _}
+    } = Db,
+    Engine;
+
 get(#db{} = Db, Property, Default) ->
     invoke(Db, get, [Property, Default]).
 
 
 set(#db{} = Db, Property, Value) ->
     invoke_update(Db, set, [Property, Value]).
-
-
-get_engine(#db{} = Db) ->
-    #db{
-        engine = {Engine, _}
-    } = Db,
-    Engine.
-
-
-get_last_purged(#db{} = Db) ->
-    invoke(Db, get_last_purged, []).
-
-
-get_doc_count(#db{} = Db) ->
-    invoke(Db, get_doc_count, []).
-
-
-get_del_doc_count(#db{} = Db) ->
-    invoke(Db, get_del_doc_count, []).
-
-
-get_size_info(#db{} = Db) ->
-    invoke(Db, get_size_info, []).
-
-
-get_security(#db{} = Db) ->
-    invoke(Db, get_security, []).
-
-
-set_security(#db{} = Db, SecProps) ->
-    {ok, NewDb} = invoke_update(Db, set_security, [SecProps]),
-    {ok, NewDb#db{
-        security = SecProps
-    }}.
 
 
 open_docs(#db{} = Db, DocIds) ->

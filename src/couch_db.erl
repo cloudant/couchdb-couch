@@ -331,28 +331,28 @@ set_user_ctx(#db{} = Db, #user_ctx{} = UserCtx) ->
     {ok, Db#db{user_ctx = UserCtx}}.
 
 get_update_seq(#db{} = Db)->
-    get_prop(Db, update_seq).
+    couch_db_engine:get(Db, update_seq).
 
 get_purge_seq(#db{}=Db) ->
-    get_prop(Db, purge_seq).
+    couch_db_engine:get(Db, purge_seq).
 
 get_last_purged(#db{}=Db) ->
-    couch_db_engine:get_last_purged(Db).
+    couch_db_engine:get(Db, last_purged).
 
 get_doc_count(Db) ->
-    couch_db_engine:get_doc_count(Db).
+    couch_db_engine:get(Db, doc_count).
 
 get_del_doc_count(Db) ->
-    couch_db_engine:get_del_doc_count(Db).
+    couch_db_engine:get(Db, del_doc_count).
 
 get_uuid(#db{}=Db) ->
-    get_prop(Db, uuid).
+    couch_db_engine:get(Db, uuid).
 
 get_epochs(#db{}=Db) ->
-    get_prop(Db, epochs).
+    couch_db_engine:get(Db, epochs).
 
 get_compacted_seq(#db{}=Db) ->
-    get_prop(Db, compacted_seq).
+    couch_db_engine:get(Db, compacted_seq).
 
 get_instance_start_time(#db{}=Db) ->
     Db#db.instance_start_time.
@@ -367,7 +367,7 @@ get_db_info(Db) ->
     DocCount = get_doc_count(Db),
     DelDocCount = get_del_doc_count(Db),
     SizeInfo = couch_db_engine:get_size_info(Db),
-    DiskVersion = get_prop(Db, disk_version),
+    DiskVersion = couch_db_engine:get(Db, disk_version),
     Uuid = case get_uuid(Db) of
         undefined -> null;
         Uuid0 -> Uuid0
@@ -382,7 +382,7 @@ get_db_info(Db) ->
         {doc_count, DocCount},
         {doc_del_count, DelDocCount},
         {update_seq, get_update_seq(Db)},
-        {purge_seq, get_prop(Db, purge_seq)},
+        {purge_seq, couch_db_engine:get(Db, purge_seq)},
         {compact_running, Compactor /= nil},
         {sizes, {SizeInfo}},
         {instance_start_time, StartTime},
@@ -1468,14 +1468,6 @@ is_systemdb(<<"shards/", _/binary>> = Path) when is_binary(Path) ->
     is_systemdb(normalize_dbname(Path));
 is_systemdb(DbName) when is_binary(DbName) ->
     lists:member(DbName, ?SYSTEM_DATABASES).
-
-get_prop(Db, Key) ->
-    get_prop(Db, Key, undefined).
-
-
-get_prop(Db, Key, Default) ->
-    couch_db_engine:get(Db, Key, Default).
-
 
 get_doc_type_conv(Options) ->
     lists:foldl(fun(Opt, Acc) ->
