@@ -4,27 +4,53 @@
 -include("couch_db.hrl").
 
 
--type filepath() -> iolist().
--type docid() -> binary().
--type rev() -> {non_negative_integer(), binary()}.
--type revs() -> [rev()].
+-type filepath() :: iolist().
+-type docid() :: binary().
+-type rev() :: {non_neg_integer(), binary()}.
+-type revs() :: [rev()].
 
--type db_open_option() -> create.
--type db_open_options() -> [db_open_options()].
+-type doc_pair() :: {
+        #full_doc_info{} | not_found,
+        #full_doc_info{} | not_found
+    }.
 
--type db_handle() -> any().
+-type doc_pairs() :: [doc_pair()].
 
--type doc_fold_fun() -> fun(#full_doc_info{}, UserAcc::any()) ->
+-type db_open_options() :: [
+        create
+    ].
+
+-type write_stream_option() :: compressed. % Need to enumerate
+-type write_stream_options() :: [write_stream_option()].
+
+-type doc_fold_options() :: [
+        {start_key, Key::any()} |
+        {end_key, Key::any()} |
+        {end_key_gt, Key::any()} |
+        {dir, fwd | rev}
+    ].
+
+-type changes_fold_options() :: [
+        % Need to enumerate these
+    ].
+
+-type compaction_options() :: [
+        % Need to enumerate these as well
+    ].
+
+-type db_handle() :: any().
+
+-type doc_fold_fun() :: fun((#full_doc_info{}, UserAcc::any()) ->
         {ok, NewUserAcc::any()} |
-        {stop, NewUserAcc::any()}.
+        {stop, NewUserAcc::any()}).
 
--type local_doc_fold_fun() -> fun(#doc{}, UserAcc::any()) ->
+-type local_doc_fold_fun() :: fun((#doc{}, UserAcc::any()) ->
         {ok, NewUserAcc::any()} |
-        {stop, NewUserAcc::any()}.
+        {stop, NewUserAcc::any()}).
 
--type changes_fold_fun() -> fun(#doc_info{}, UserAcc::any()) ->
+-type changes_fold_fun() :: fun((#doc_info{}, UserAcc::any()) ->
         {ok, NewUserAcc::any()} |
-        {stop, NewUserAcc::any()}.
+        {stop, NewUserAcc::any()}).
 
 
 -callback exists(DbPath::filepath()) -> boolean.
@@ -46,8 +72,8 @@
 
 
 -callback handle_info(Msg::any(), DbHandle::db_handle()) ->
-    {noreply, NewDbHandle:db_handle()} |
-    {noreply, NewDbHandle:db_handle(), Timeout::timeout()} |
+    {noreply, NewDbHandle::db_handle()} |
+    {noreply, NewDbHandle::db_handle(), Timeout::timeout()} |
     {stop, Reason::any(), NewDbHandle::db_handle()}.
 
 
@@ -69,7 +95,7 @@
         [#full_doc_info{} | not_found].
 
 
--callabck open_local_docs(DbHandle::db_handle(), DocIds::[docid()]) ->
+-callback open_local_docs(DbHandle::db_handle(), DocIds::[docid()]) ->
         [#doc{} | not_found].
 
 
@@ -88,8 +114,8 @@
 -callback write_doc_infos(
     DbHandle::db_handle(),
     Pairs::doc_pairs(),
-    RemSeqs::[non_neg_integer()],
-    LocalDocs::[#doc{}]) ->
+    LocalDocs::[#doc{}],
+    PurgedDocIdRevs::[{docid(), revs()}]) ->
         {ok, NewDbHandle::db_handle()}.
 
 
@@ -123,13 +149,13 @@
     DbHandle::db_handle(),
     UserFold::local_doc_fold_fun(),
     UserAcc::any(),
-    local_doc_fold_options()) ->
+    doc_fold_options()) ->
         {ok, LastUserAcc::any()}.
 
 
 -callback fold_changes(
     DbHandle::db_handle(),
-    StartSeq::non_negative_integer(),
+    StartSeq::non_neg_integer(),
     UserFold::changes_fold_fun(),
     UserAcc::any(),
     changes_fold_options()) ->
@@ -138,8 +164,8 @@
 
 -callback count_changes_since(
     DbHandle::db_handle(),
-    UpdateSeq::non_negative_integer()) ->
-        TotalChanges::non_negative_integer().
+    UpdateSeq::non_neg_integer()) ->
+        TotalChanges::non_neg_integer().
 
 
 -callback start_compaction(
@@ -207,7 +233,7 @@ delete(Engine, RootDir, DbPath, Async) ->
     Engine:delete(RootDir, DbPath, Async).
 
 
-delete_compaction_files(Engine, RootDir, Dbpath) ->
+delete_compaction_files(Engine, RootDir, DbPath) ->
     Engine:delete_compaction_files(RootDir, DbPath).
 
 
@@ -221,7 +247,8 @@ init(Engine, DbPath, Options) ->
 
 
 terminate(Reason, #db{} = Db) ->
-    invoke(Db, terminate, []).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:terminate(EngineState, Reason).
 
 
 handle_info(Msg, #db{} = Db) ->
@@ -241,15 +268,18 @@ handle_info(Msg, #db{} = Db) ->
 
 
 incref(#db{} = Db) ->
-    invoke_update(Db, incref, []).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:incref(EngineState).
 
 
 decref(#db{} = Db) ->
-    invoke(Db, decref, []).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:decref(EngineState).
 
 
 monitored_by(#db{} = Db) ->
-    invoke(Db, monitored_by, []).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:monitored_by(EngineState).
 
 
 get(#db{} = Db, Property) ->
@@ -257,81 +287,100 @@ get(#db{} = Db, Property) ->
 
 
 get(#db{} = Db, engine, _) ->
-    #db{
-        engine = {Engine, _}
-    } = Db,
+    #db{engine = {Engine, _}} = Db,
     Engine;
 
 get(#db{} = Db, Property, Default) ->
-    invoke(Db, get, [Property, Default]).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:get(EngineState, Property, Default).
 
 
 set(#db{} = Db, Property, Value) ->
-    invoke_update(Db, set, [Property, Value]).
+    #db{engine = {Engine, EngineState}} = Db,
+    {ok, NewSt} = Engine:set(EngineState, Property, Value),
+    {ok, Db#db{engine = {Engine, NewSt}}}.
 
 
 open_docs(#db{} = Db, DocIds) ->
-    invoke(Db, open_docs, [DocIds]).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:open_docs(EngineState, DocIds).
 
 
 open_local_docs(#db{} = Db, DocIds) ->
-    invoke(Db, open_local_docs, [DocIds]).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:open_local_docs(EngineState, DocIds).
 
 
 read_doc(#db{} = Db, DocPtr) ->
-    invoke(Db, read_doc, [DocPtr]).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:read_doc(EngineState, DocPtr).
 
 
 make_doc_summary(#db{} = Db, DocParts) ->
-    invoke(Db, make_doc_summary, [DocParts]).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:make_doc_summary(EngineState, DocParts).
 
 
 write_doc_summary(#db{} = Db, DocSummary) ->
-    invoke(Db, write_doc_summary, [DocSummary]).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:write_doc_summary(EngineState, DocSummary).
 
 
 write_doc_infos(#db{} = Db, DocUpdates, LocalDocs, PurgedDocIdRevs) ->
-    invoke_update(Db, write_docs, [DocUpdates, LocalDocs, PurgedDocIdsRevs]).
+    #db{engine = {Engine, EngineState}} = Db,
+    {ok, NewSt} = Engine:write_docs(
+            EngineState, DocUpdates, LocalDocs, PurgedDocIdRevs),
+    {ok, Db#db{engine = {Engine, NewSt}}}.
 
 
 commit_data(#db{} = Db) ->
-    invoke_update(Db, commit_data, []).
+    #db{engine = {Engine, EngineState}} = Db,
+    {ok, NewSt} = Engine:commit_data(EngineState),
+    {ok, Db#db{engine = {Engine, NewSt}}}.
 
 
 open_write_stream(#db{} = Db, Options) ->
-    invoke(Db, open_write_stream, [Options]).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:open_write_stream(EngineState, Options).
 
 
 open_read_stream(#db{} = Db, StreamDiskInfo) ->
-    invoke(Db, open_read_stream, [StreamDiskInfo]).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:open_read_stream(EngineState, StreamDiskInfo).
 
 
 is_active_stream(#db{} = Db, ReadStreamState) ->
-    invoke(Db, is_active_stream, [ReadStreamState]).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:is_active_stream(EngineState, ReadStreamState).
 
 
 fold_docs(#db{} = Db, UserFun, UserAcc, Options) ->
-    invoke(Db, fold_docs, UserFun, UserAcc, Options).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:fold_docs(EngineState, UserFun, UserAcc, Options).
 
 
 fold_local_docs(#db{} = Db, UserFun, UserAcc, Options) ->
-    invoke(Db, fold_local_docs, UserFun, UserAcc, Options).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:fold_local_docs(EngineState, UserFun, UserAcc, Options).
 
 
 fold_changes(#db{} = Db, StartSeq, UserFun, UserAcc, Options) ->
-    invoke(Db, fold_changes, StartSeq, UserFun, UserAcc, Options).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:fold_changes(EngineState, StartSeq, UserFun, UserAcc, Options).
 
 
 count_changes_since(#db{} = Db, StartSeq) ->
-    invoke(Db, count_changes_since, StartSeq).
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:count_changes_since(EngineState, StartSeq).
 
 
-start_compaction(#db{} = Db, DbName, Options, Parent) ->
+start_compaction(#db{} = Db) ->
     #db{
+        engine = {Engine, EngineState},
         name = DbName,
         options = Options
     } = Db,
-    CompactorPid = invoke(Db, start_compaction, DbName, Options, self()).
+    Pid = Engine:start_compaction(EngineState, DbName, Options, self()),
     {ok, Db#db{
         compactor_pid = Pid
     }}.
@@ -371,55 +420,3 @@ finish_compaction(OldDb, CompactFilePath) ->
             ok = gen_server:call(couch_server, {db_updated, NewDb}, infinity),
             NewDb
     end.
-
-
-invoke(Db, Fun) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:Fun(EngineState).
-
-
-invoke(Db, Fun, Arg1) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    Engine:Fun(EngineState, Arg1).
-
-
-invoke(Db, Fun, Arg1, Arg2) ->
-    #db{
-        engine = {Engine, EngineState}
-    },
-    Engine:Fun(EngineState, Arg1, Arg2).
-
-
-invoke_update(Db, Fun) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    {ok, NewEngineState} = Engine:Fun(EngineState),
-    {ok, Db#db{
-        engine = {Engine, NewEngineState}
-    }}.
-
-
-invoke_update(Db, Fun, Arg1) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    {ok, NewEngineState} = Engine:Fun(EngineState, Arg1),
-    {ok, Db#db{
-        engine = {Engine, NewEngineState}
-    }}.
-
-
-invoke_update(Db, Fun, Arg1, Arg2, Arg3) ->
-    #db{
-        engine = {Engine, EngineState}
-    } = Db,
-    {ok, NewEngineState} =
-            erlang:apply(Engine, Fun, EngineState, Arg1, Arg2, Arg3),
-    {ok, Db#db{
-        engine = {Engine, NewEngineState}
-    }}.

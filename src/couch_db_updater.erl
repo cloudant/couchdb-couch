@@ -74,8 +74,8 @@ handle_call(cancel_compact, _From, #db{compactor_pid = Pid} = Db) ->
 
 handle_call({set_security, NewSec}, _From, #db{} = Db) ->
     {ok, NewDb} = couch_db_engine:set_security(Db, NewSec),
-    ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
-    {reply, ok, Db2};
+    ok = gen_server:call(couch_server, {db_updated, NewDb}, infinity),
+    {reply, ok, NewDb};
 
 handle_call({set_revs_limit, Limit}, _From, Db) ->
     {ok, Db2} = couch_db_engine:set(Db, revs_limit, Limit),
@@ -103,16 +103,15 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
     end, lists:zip(IdRevs, OldDocInfos)),
 
     InitUpdateSeq = couch_db_engine:get(Db, update_seq),
-    InitAcc = {InitUpdateSeq, [], [], []},
+    InitAcc = {InitUpdateSeq, [], []},
     FinalAcc = lists:foldl(fun({_, #full_doc_info{} = OldFDI, RemRevs}, Acc) ->
         #full_doc_info{
             id = Id,
-            update_seq = RemSeq,
             rev_tree = OldTree
         } = OldFDI,
-        {SeqAcc, FDIAcc, RemSeqAcc, IdRevsAcc} = Acc,
+        {SeqAcc0, FDIAcc, IdRevsAcc} = Acc,
 
-        NewFDIAcc = case OldTree of
+        {NewFDIAcc, NewSeqAcc} = case OldTree of
             [] ->
                 % If we purged every #leaf{} in the doc record
                 % then we're removing it completely from the
@@ -124,26 +123,25 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
                 % sequence. Rather than do a bunch of complicated checks
                 % we just re-label every #leaf{} and reinsert it into
                 % the update_seq sequence.
-                {NewTree, NewSeqAcc} = couch_key_tree:mapfold(fun
+                {NewTree, SeqAcc1} = couch_key_tree:mapfold(fun
                     (_RevId, Leaf, leaf, InnerSeqAcc) ->
                         {Leaf#leaf{seq = InnerSeqAcc + 1}, InnerSeqAcc + 1};
                     (_RevId, Value, _Type, InnerSeqAcc) ->
                         {Value, InnerSeqAcc}
-                end, SeqAcc, OldTree),
+                end, SeqAcc0, OldTree),
 
                 NewFDI = OldFDI#full_doc_info{
-                    update_seq = NewSeqAcc,
+                    update_seq = SeqAcc1,
                     rev_tree = NewTree
                 },
 
-                [NewFDI | FDIAcc]
+                {[NewFDI | FDIAcc], SeqAcc1}
         end,
-        NewRemSeqAcc = [RemSeq | RemSeqAcc],
         NewIdRevsAcc = [{Id, RemRevs} | IdRevsAcc],
-        {NewSeqAcc, NewFDIAcc, NewRemSeqAcc, NewIdRevsAcc}
+        {NewSeqAcc, NewFDIAcc, NewIdRevsAcc}
     end, InitAcc, NewDocInfos),
 
-    {FinalSeq, FDIs, RemSeqs, PurgedIdRevs} = FinalAcc,
+    {_FinalSeq, FDIs, PurgedIdRevs} = FinalAcc,
 
     % We need to only use the list of #full_doc_info{} records
     % that we have actually changed due to a purge.
@@ -179,7 +177,7 @@ handle_cast(start_compact, Db) ->
             {noreply, Db}
     end;
 handle_cast({compact_done, CompactEngine, CompactFilePath}, #db{} = OldDb) ->
-    NewDb = case couch_db_engine:get_engine(Db, CompactEngine) of
+    NewDb = case couch_db_engine:get_engine(OldDb, CompactEngine) of
         CompactEngine ->
             couch_db_engine:finish_compaction(OldDb, CompactFilePath);
         _ ->
@@ -573,15 +571,13 @@ update_docs_int(Db, DocsList, LocalDocs, MergeConflicts, FullCommit) ->
             #full_doc_info{id=Id}
     end, Ids, OldDocLookups),
     % Merge the new docs into the revision trees.
-    {ok, NewFullDocInfos, RemSeqs, NewSeq} = merge_rev_trees(RevsLimit,
+    {ok, NewFullDocInfos, RemSeqs, _} = merge_rev_trees(RevsLimit,
             MergeConflicts, DocsList, OldDocInfos, [], [], UpdateSeq),
 
     % Write out the document summaries (the bodies are stored in the nodes of
     % the trees, the attachments are already written to disk)
     {ok, IndexFDIs} = flush_trees(Db, NewFullDocInfos, []),
-
-    WritePairs = pair_write_info(OldDocLookups, IndexFDIs),
-
+    Pairs = pair_write_info(OldDocLookups, IndexFDIs),
     LocalDocs2 = update_local_doc_revs(LocalDocs),
 
     {ok, Db1} = couch_db_engine:write_doc_infos(Db, Pairs, LocalDocs2, []),
@@ -592,7 +588,7 @@ update_docs_int(Db, DocsList, LocalDocs, MergeConflicts, FullCommit) ->
     couch_stats:increment_counter([couchdb, document_writes], WriteCount),
     couch_stats:increment_counter(
         [couchdb, local_document_writes],
-        length(NewNonRepDocs)
+        length(LocalDocs2)
     ),
 
     % Check if we just updated any design documents, and update the validation
@@ -655,7 +651,7 @@ commit_data(Db, _) ->
     {ok, Db1} = couch_db_engine:commit_data(Db),
     Db1#db{
         waiting_delayed_commit = nil,
-        commited_update_seq = couch_db_engine:get(Db, update_seq)
+        committed_update_seq = couch_db_engine:get(Db, update_seq)
     }.
 
 
@@ -672,7 +668,7 @@ get_update_seq(Db) ->
     couch_db_engine:get(Db, update_seq).
 
 
-finish_engine_swap(OldDb, NewEngine, CompactFilePath) ->
+finish_engine_swap(_OldDb, _NewEngine, _CompactFilePath) ->
     erlang:error(explode).
 
 
@@ -691,7 +687,7 @@ pair_write_info(Old, New) ->
 
 pair_purge_info(Old, New) ->
     lists:map(fun(OldFDI) ->
-        case lists:keysearch(FDI#full_doc_info.id, #full_doc_info.id, New) of
+        case lists:keysearch(OldFDI#full_doc_info.id, #full_doc_info.id, New) of
             #full_doc_info{} = NewFDI -> {OldFDI, NewFDI};
             false -> {OldFDI, not_found}
         end

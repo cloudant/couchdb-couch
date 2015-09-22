@@ -312,7 +312,7 @@ get_full_doc_info(Db, Id) ->
     Result.
 
 get_full_doc_infos(Db, Ids) ->
-    couch_db_engine:open_docs(EngineState, Ids).
+    couch_db_engine:open_docs(Db, Ids).
 
 purge_docs(#db{main_pid=Pid}, IdsRevs) ->
     gen_server:call(Pid, {purge_docs, IdsRevs}).

@@ -213,12 +213,14 @@ set(#st{} = St, security, NewSecurity) ->
 
 set(#st{} = St, DbProp, Value) ->
     #st{
-        header = Header,
-        update_seq = UpdateSeq
+        header = Header
     } = St,
+    UpdateSeq = couch_bt_engine_header:get(Header, update_seq),
     {ok, St#st{
-        header = couch_bt_engine_header:set(Header, DbProp, Value),
-        update_seq = UpdateSeq + 1,
+        header = couch_bt_engine_header:set(Header, [
+            {DbProp, Value},
+            {update_seq, UpdateSeq + 1}
+        ]),
         needs_commit = true
     }}.
 
@@ -295,8 +297,8 @@ write_doc_infos(#st{} = St, Pairs, LocalDocs, PurgedIdRevs) ->
     NewHeader = case PurgedIdRevs of
         [] ->
             St#st.header;
-        Else ->
-            {ok, Ptr} = couch_file:append_term(St#st.fd, IdRevsPurged),
+        _ ->
+            {ok, Ptr} = couch_file:append_term(St#st.fd, PurgedIdRevs),
             OldPurgeSeq = couch_bt_engine_header:get(St#st.header, purge_seq),
             couch_bt_engine_header:set(St#st.header, [
                 {purge_seq, OldPurgeSeq + 1},
