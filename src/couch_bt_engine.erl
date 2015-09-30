@@ -299,13 +299,20 @@ write_doc_infos(#st{} = St, Pairs, LocalDocs, PurgedIdRevs) ->
     {ok, SeqTree2} = couch_btree:add_remove(SeqTree, Add, RemSeqs),
     {ok, LocalTree2} = couch_btree:add_remove(LocalTree, LocalDocs, []),
 
+    NewUpdateSeq = lists:foldl(fun(#full_doc_info{update_seq=US}, Acc) ->
+        erlang:max(Seq, Acc)
+    end, ?MODULE:get(St, update_seq), Add),
+
     NewHeader = case PurgedIdRevs of
         [] ->
-            St#st.header;
+            couch_bt_engine_header:set(St#st.header, [
+                {update_seq, NewUpdateSeq}
+            ]);
         _ ->
             {ok, Ptr} = couch_file:append_term(St#st.fd, PurgedIdRevs),
             OldPurgeSeq = couch_bt_engine_header:get(St#st.header, purge_seq),
             couch_bt_engine_header:set(St#st.header, [
+                {update_seq, NewUpdateSeq},
                 {purge_seq, OldPurgeSeq + 1},
                 {purged_docs, Ptr}
             ])
