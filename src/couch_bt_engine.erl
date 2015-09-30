@@ -9,6 +9,7 @@
 
     init/2,
     terminate/2,
+    handle_call/2,
     handle_info/2,
 
     incref/1,
@@ -39,7 +40,7 @@
     count_changes_since/2,
 
     start_compaction/4,
-    finish_compaction/2
+    finish_compaction/4
 ]).
 
 
@@ -128,6 +129,10 @@ terminate(_Reason, St) ->
     end,
     couch_util:shutdown_sync(St#st.fd),
     ok.
+
+
+handle_call(Msg, St) ->
+    {stop, {invalid_call, Msg}, {invalid_call, Msg}, St}.
 
 
 handle_info({'DOWN', Ref, _, _, _}, #st{fd_monitor=Ref} = St) ->
@@ -419,7 +424,7 @@ finish_compaction(OldState, DbName, Options, CompactFilePath) ->
                            "(update seq=~p. compact update seq=~p). Retrying.",
                            [OldSeq, NewSeq]),
             ok = decref(NewState1),
-            start_compaction(OldState, DbName, Options, self()),
+            start_compaction(OldState, DbName, Options, self())
     end.
 
 

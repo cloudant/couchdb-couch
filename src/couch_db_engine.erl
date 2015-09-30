@@ -68,7 +68,8 @@
 
 
 -callback handle_call(Msg::any(), DbHandle::db_handle()) ->
-        {reply, Resp, NewDbHandle::db_handle()}.
+        {reply, Resp::any(), NewDbHandle::db_handle()} |
+        {stop, Reason::any(), Resp::any(), NewDbHandle::db_handle()}.
 
 
 -callback handle_info(Msg::any(), DbHandle::db_handle()) ->
@@ -194,6 +195,7 @@
 
     init/3,
     terminate/2,
+    handle_call/3,
     handle_info/2,
 
     incref/1,
@@ -259,7 +261,9 @@ handle_call(Msg, _From, #db{} = Db) ->
     } = Db,
     case Engine:handle_call(Msg, EngineState) of
         {reply, Resp, NewState} ->
-            {reply, Resp, Db#db{engine = {Engine, NewState}}}
+            {reply, Resp, Db#db{engine = {Engine, NewState}}};
+        {stop, Reason, Resp, NewState} ->
+            {stop, Reason, Resp, Db#db{engine = {Engine, NewState}}}
     end.
 
 

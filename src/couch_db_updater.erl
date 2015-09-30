@@ -182,7 +182,11 @@ handle_cast(start_compact, Db) ->
 handle_cast({compact_done, CompactEngine, CompactInfo}, #db{} = OldDb) ->
     NewDb = case couch_db_engine:get(OldDb, engine) of
         CompactEngine ->
-            couch_db_engine:finish_compaction(OldDb, CompactInfo);
+            #db{
+                name = DbName,
+                options = Opts
+            } = OldDb,
+            couch_db_engine:finish_compaction(OldDb, DbName, Opts, CompactInfo);
         _ ->
             finish_engine_swap(OldDb, CompactEngine, CompactInfo)
     end,
