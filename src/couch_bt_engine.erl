@@ -216,6 +216,17 @@ set(#st{} = St, security, NewSecurity) ->
     {ok, Ptr, _} = couch_file:append_term(St#st.fd, NewSecurity, Options),
     set(St, security_ptr, Ptr);
 
+set(#st{} = St, update_seq, Value) ->
+    #st{
+        header = Header
+    } = St,
+    {ok, St#st{
+        header = couch_bt_engine_header:set(Header, [
+            {update_seq, Value}
+        ]),
+        needs_commit = true
+    }};
+
 set(#st{} = St, DbProp, Value) ->
     #st{
         header = Header
@@ -299,7 +310,7 @@ write_doc_infos(#st{} = St, Pairs, LocalDocs, PurgedIdRevs) ->
     {ok, SeqTree2} = couch_btree:add_remove(SeqTree, Add, RemSeqs),
     {ok, LocalTree2} = couch_btree:add_remove(LocalTree, LocalDocs, []),
 
-    NewUpdateSeq = lists:foldl(fun(#full_doc_info{update_seq=US}, Acc) ->
+    NewUpdateSeq = lists:foldl(fun(#full_doc_info{update_seq=Seq}, Acc) ->
         erlang:max(Seq, Acc)
     end, ?MODULE:get(St, update_seq), Add),
 
