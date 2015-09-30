@@ -34,10 +34,6 @@
         % Need to enumerate these
     ].
 
--type compaction_options() :: [
-        % Need to enumerate these as well
-    ].
-
 -type db_handle() :: any().
 
 -type doc_fold_fun() :: fun((#full_doc_info{}, UserAcc::any()) ->
@@ -175,14 +171,16 @@
 -callback start_compaction(
     DbHandle::db_handle(),
     DbName::binary(),
-    Options::compaction_options(),
+    Options::db_open_options(),
     Parent::pid()) ->
         CompactorPid::pid().
 
 
 -callback finish_compaction(
     OldDbHandle::db_handle(),
-    NewDbHandle::db_handle()) ->
+    DbName::binary(),
+    Options::db_open_options(),
+    Parent::pid()) ->
         {ok, CompactedDbHandle::db_handle()}.
 
 
@@ -394,43 +392,32 @@ start_compaction(#db{} = Db) ->
         name = DbName,
         options = Options
     } = Db,
-    Pid = Engine:start_compaction(EngineState, DbName, Options, self()),
+    {ok, NewEngineState, Pid} = Engine:start_compaction(
+            EngineState, DbName, Options, self()),
     {ok, Db#db{
+        engine = {Engine, NewEngineState},
         compactor_pid = Pid
     }}.
 
 
-finish_compaction(OldDb, CompactFilePath) ->
+finish_compaction(Db, CompactInfo) ->
     #db{
-        engine = {Engine, OldState}
-    } = OldDb,
-    {ok, NewState1} = Engine:init(CompactFilePath, OldDb#db.options),
-    OldSeq = Engine:get(OldState, update_seq),
-    NewSeq = Engine:get(NewState1, update_seq),
-    case OldSeq == NewSeq of
-        true ->
-            {ok, NewState2} = Engine:finish_compaction(OldState, NewState1),
-            NewDb1 = OldDb#db{
-                engine = {Engine, NewState2},
+        engine = {Engine, St},
+        name = DbName,
+        options = Options
+    } = Db,
+    NewDb = case Engine:finish_compaction(St, DbName, Options, CompactInfo) of
+        {ok, NewState, undefined} ->
+            couch_event:notify(DbName, compacted),
+            Db#db{
+                engine = {Engine, NewState},
                 compactor_pid = nil
-            },
-            % Why do we refresh validation functions here?
-            %NewDb2 = refresh_validate_doc_funs(NewDb1),
-            NewDb2 = NewDb1,
-            ok = gen_server:call(couch_server, {db_updated, NewDb2}, infinity),
-            couch_event:notify(NewDb2#db.name, compacted),
-            Arg = [NewDb2#db.name],
-            couch_log:info("Compaction for db \"~s\" completed.", Arg),
-            NewDb2;
-        false ->
-            ok = Engine:decref(NewState1),
-            NewDb = OldDb#db{
-                compactor_pid = Engine:start_compaction(
-                        OldState, OldDb#db.name, OldDb#db.options, self())
-            },
-            couch_log:info("Compaction file still behind main file "
-                           "(update seq=~p. compact update seq=~p). Retrying.",
-                           [OldSeq, NewSeq]),
-            ok = gen_server:call(couch_server, {db_updated, NewDb}, infinity),
-            NewDb
-    end.
+            };
+        {ok, NewState, CompactorPid} when is_pid(CompactorPid) ->
+            Db#db{
+                engine = {Engine, NewState},
+                compactor_pid = CompactorPid
+            }
+    end,
+    ok = gen_server:call(couch_server, {db_updated, NewDb}, infinity),
+    {ok, NewDb}.

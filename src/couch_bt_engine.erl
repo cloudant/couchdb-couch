@@ -403,55 +403,24 @@ count_changes_since(St, SinceSeq) ->
 
 start_compaction(St, DbName, Options, Parent) ->
     Args = [St, DbName, Options, Parent],
-    spawn_link(couch_bt_engine_compactor, start, Args).
+    Pid = spawn_link(couch_bt_engine_compactor, start, Args),
+    {ok, St, Pid}.
 
 
-finish_compaction(#st{} = OldSt, #st{} = NewSt1) ->
-    #st{
-        filepath = FilePath,
-        local_tree = OldLocal
-    } = OldSt,
-    #st{
-        filepath = CompactDataPath,
-        local_tree = NewLocal1
-    } = NewSt1,
-
-    % suck up all the local docs into memory and write them to the new db
-    LoadFun = fun(Value, _Offset, Acc) ->
-        {ok, [Value | Acc]}
-    end,
-    {ok, _, LocalDocs} = couch_btree:foldl(OldLocal, LoadFun, []),
-    {ok, NewLocal2} = couch_btree:add(NewLocal1, LocalDocs),
-
-    CompactedSeq = ?MODULE:get(OldSt, update_seq),
-    {ok, NewSt2} = ?MODULE:set(NewSt1, compacted_seq, CompactedSeq),
-    NewSt3 = commit_data(NewSt2#st{
-        local_tree = NewLocal2
-    }),
-
-    % Rename our *.compact.data file to *.compact so that if we
-    % die between deleting the old file and renaming *.compact
-    % we can recover correctly.
-    ok = file:rename(CompactDataPath, FilePath ++ ".compact"),
-
-    % Remove the uncompacted database file
-    RootDir = config:get("couchdb", "database_dir", "."),
-    couch_file:delete(RootDir, FilePath),
-
-    % Move our compacted file into its final location
-    ok = file:rename(FilePath ++ ".compact", FilePath),
-
-    % Delete the old meta compaction file after promoting
-    % the compaction file.
-    couch_file:delete(RootDir, FilePath ++ ".compact.meta"),
-
-    % We're finished with our old state
-    decref(OldSt),
-
-    % And return our finished new state
-    {ok, NewSt3#st{
-        filepath = FilePath
-    }}.
+finish_compaction(OldState, DbName, Options, CompactFilePath) ->
+    {ok, NewState1} = ?MODULE:init(CompactFilePath, Options),
+    OldSeq = ?MODULE:get(OldState, update_seq),
+    NewSeq = ?MODULE:get(NewState1, update_seq),
+    case OldSeq == NewSeq of
+        true ->
+            finish_compaction_int(OldState, NewState1);
+        false ->
+            couch_log:info("Compaction file still behind main file "
+                           "(update seq=~p. compact update seq=~p). Retrying.",
+                           [OldSeq, NewSeq]),
+            ok = decref(NewState1),
+            start_compaction(OldState, DbName, Options, self()),
+    end.
 
 
 id_tree_split(#full_doc_info{}=Info) ->
@@ -785,3 +754,51 @@ fold_docs_reduce_to_count(Reds) ->
     RedFun = fun id_tree_reduce/2,
     FinalRed = couch_btree:final_reduce(RedFun, Reds),
     element(1, FinalRed).
+
+
+finish_compaction_int(#st{} = OldSt, #st{} = NewSt1) ->
+    #st{
+        filepath = FilePath,
+        local_tree = OldLocal
+    } = OldSt,
+    #st{
+        filepath = CompactDataPath,
+        local_tree = NewLocal1
+    } = NewSt1,
+
+    % suck up all the local docs into memory and write them to the new db
+    LoadFun = fun(Value, _Offset, Acc) ->
+        {ok, [Value | Acc]}
+    end,
+    {ok, _, LocalDocs} = couch_btree:foldl(OldLocal, LoadFun, []),
+    {ok, NewLocal2} = couch_btree:add(NewLocal1, LocalDocs),
+
+    CompactedSeq = ?MODULE:get(OldSt, update_seq),
+    {ok, NewSt2} = ?MODULE:set(NewSt1, compacted_seq, CompactedSeq),
+    NewSt3 = commit_data(NewSt2#st{
+        local_tree = NewLocal2
+    }),
+
+    % Rename our *.compact.data file to *.compact so that if we
+    % die between deleting the old file and renaming *.compact
+    % we can recover correctly.
+    ok = file:rename(CompactDataPath, FilePath ++ ".compact"),
+
+    % Remove the uncompacted database file
+    RootDir = config:get("couchdb", "database_dir", "."),
+    couch_file:delete(RootDir, FilePath),
+
+    % Move our compacted file into its final location
+    ok = file:rename(FilePath ++ ".compact", FilePath),
+
+    % Delete the old meta compaction file after promoting
+    % the compaction file.
+    couch_file:delete(RootDir, FilePath ++ ".compact.meta"),
+
+    % We're finished with our old state
+    decref(OldSt),
+
+    % And return our finished new state
+    {ok, NewSt3#st{
+        filepath = FilePath
+    }, undefined}.
