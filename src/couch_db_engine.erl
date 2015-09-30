@@ -285,7 +285,8 @@ handle_info(Msg, #db{} = Db) ->
 
 incref(#db{} = Db) ->
     #db{engine = {Engine, EngineState}} = Db,
-    Engine:incref(EngineState).
+    {ok, NewState} = Engine:incref(EngineState),
+    {ok, Db#db{engine = {Engine, NewState}}}.
 
 
 decref(#db{} = Db) ->
