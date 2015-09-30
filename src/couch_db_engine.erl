@@ -345,7 +345,7 @@ write_doc_summary(#db{} = Db, DocSummary) ->
 
 write_doc_infos(#db{} = Db, DocUpdates, LocalDocs, PurgedDocIdRevs) ->
     #db{engine = {Engine, EngineState}} = Db,
-    {ok, NewSt} = Engine:write_docs(
+    {ok, NewSt} = Engine:write_doc_infos(
             EngineState, DocUpdates, LocalDocs, PurgedDocIdRevs),
     {ok, Db#db{engine = {Engine, NewSt}}}.
 
