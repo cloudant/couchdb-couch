@@ -73,7 +73,7 @@ handle_call(cancel_compact, _From, #db{compactor_pid = Pid} = Db) ->
     {reply, ok, Db2};
 
 handle_call({set_security, NewSec}, _From, #db{} = Db) ->
-    {ok, NewDb} = couch_db_engine:set_security(Db, NewSec),
+    {ok, NewDb} = couch_db_engine:set(Db, security, NewSec),
     ok = gen_server:call(couch_server, {db_updated, NewDb}, infinity),
     {reply, ok, NewDb};
 
@@ -182,11 +182,7 @@ handle_cast(start_compact, Db) ->
 handle_cast({compact_done, CompactEngine, CompactInfo}, #db{} = OldDb) ->
     NewDb = case couch_db_engine:get(OldDb, engine) of
         CompactEngine ->
-            #db{
-                name = DbName,
-                options = Opts
-            } = OldDb,
-            couch_db_engine:finish_compaction(OldDb, DbName, Opts, CompactInfo);
+            couch_db_engine:finish_compaction(OldDb, CompactInfo);
         _ ->
             finish_engine_swap(OldDb, CompactEngine, CompactInfo)
     end,

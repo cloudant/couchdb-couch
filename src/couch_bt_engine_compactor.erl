@@ -91,7 +91,7 @@ copy_purge_info(OldSt, NewSt) ->
     OldPurgeSeq = couch_bt_engine_header:purge_seq(OldHdr),
     case OldPurgeSeq > 0 of
         true ->
-            {ok, Purged} = couch_bt_engine:get_last_purged(OldSt),
+            Purged = couch_bt_engine:get(OldSt, last_purged),
             Opts = [{compression, NewSt#st.compression}],
             {ok, Ptr, _} = couch_file:append_term(NewSt#st.fd, Purged, Opts),
             NewNewHdr = couch_bt_engine_header:set(NewHdr, [
@@ -171,10 +171,10 @@ copy_compact(DbName, St, NewSt0, Retry) ->
     NewSt3 = copy_docs(St, NewSt2, lists:reverse(Uncopied), Retry),
 
     % Copy the security information over
-    {ok, NewSt4} = case couch_bt_engine:get_security(St) of
-        {ok, []} ->
+    {ok, NewSt4} = case couch_bt_engine:get(St, security) of
+        [] ->
             couch_bt_engine:set(NewSt3, security_ptr, nil);
-        {ok, SecProps} ->
+        SecProps ->
             {ok, Ptr, _} = couch_file:append_term(
                 NewSt3#st.fd, SecProps, [{compression, NewSt3#st.compression}]),
             couch_bt_engine:set(NewSt3, security_ptr, Ptr)

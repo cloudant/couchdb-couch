@@ -366,7 +366,7 @@ get_db_info(Db) ->
     } = Db,
     DocCount = get_doc_count(Db),
     DelDocCount = get_del_doc_count(Db),
-    SizeInfo = couch_db_engine:get_size_info(Db),
+    SizeInfo = couch_db_engine:get(Db, size_info),
     DiskVersion = couch_db_engine:get(Db, disk_version),
     Uuid = case get_uuid(Db) of
         undefined -> null;
@@ -378,7 +378,7 @@ get_db_info(Db) ->
     end,
     InfoList = [
         {db_name, Name},
-        {engine, couch_db_engine:get_engine(Db)},
+        {engine, couch_db_engine:get(Db, engine)},
         {doc_count, DocCount},
         {doc_del_count, DelDocCount},
         {update_seq, get_update_seq(Db)},
