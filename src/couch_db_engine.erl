@@ -71,6 +71,10 @@
 -callback terminate(Reason::any(), DbHandle::db_handle()) -> Ignored::any().
 
 
+-callback handle_call(Msg::any(), DbHandle::db_handle()) ->
+        {reply, Resp, NewDbHandle::db_handle()}.
+
+
 -callback handle_info(Msg::any(), DbHandle::db_handle()) ->
     {noreply, NewDbHandle::db_handle()} |
     {noreply, NewDbHandle::db_handle(), Timeout::timeout()} |
@@ -249,6 +253,16 @@ init(Engine, DbPath, Options) ->
 terminate(Reason, #db{} = Db) ->
     #db{engine = {Engine, EngineState}} = Db,
     Engine:terminate(EngineState, Reason).
+
+
+handle_call(Msg, _From, #db{} = Db) ->
+    #db{
+        engine = {Engine, EngineState}
+    } = Db,
+    case Engine:handle_call(Msg, EngineState) of
+        {reply, Resp, NewState} ->
+            {reply, Resp, Db#db{engine = {Engine, NewState}}}
+    end.
 
 
 handle_info(Msg, #db{} = Db) ->

@@ -154,7 +154,10 @@ handle_call({purge_docs, IdRevs}, _From, Db) ->
     couch_event:notify(Db#db.name, updated),
 
     PurgeSeq = couch_db_engine:get(Db2, purge_seq),
-    {reply, {ok, PurgeSeq, PurgedIdRevs}, Db2}.
+    {reply, {ok, PurgeSeq, PurgedIdRevs}, Db2};
+
+handle_call(Msg, From, Db) ->
+    couch_db_engine:handle_call(Msg, From, Db).
 
 
 handle_cast({load_validation_funs, ValidationFuns}, Db) ->
