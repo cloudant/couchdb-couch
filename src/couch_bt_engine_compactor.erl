@@ -47,7 +47,7 @@ start(#st{} = St, DbName, Options, Parent) ->
     NewSt3 = sort_meta_data(NewSt2),
     NewSt4 = commit_compaction_data(NewSt3),
     NewSt5 = copy_meta_data(NewSt4),
-    NewSt6 = couch_bt_engine:commit_data(NewSt5),
+    {ok, NewSt6} = couch_bt_engine:commit_data(NewSt5),
     ok = couch_bt_engine:decref(NewSt6),
     ok = couch_file:close(MFd),
 
