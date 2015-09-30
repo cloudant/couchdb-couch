@@ -252,7 +252,7 @@ init(Engine, DbPath, Options) ->
 
 terminate(Reason, #db{} = Db) ->
     #db{engine = {Engine, EngineState}} = Db,
-    Engine:terminate(EngineState, Reason).
+    Engine:terminate(Reason, EngineState).
 
 
 handle_call(Msg, _From, #db{} = Db) ->
