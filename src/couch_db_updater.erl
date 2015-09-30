@@ -171,7 +171,9 @@ handle_cast(start_compact, Db) ->
             % storage engine. After the first round of patches
             % we'll add a field that sets the target engine
             % type to compact to with a new copy compactor.
-            couch_log:info("Starting compaction for db \"~s\"", [Db#db.name]),
+            UpdateSeq = couch_db_engine:get(Db, update_seq),
+            Args = [Db#db.name, UpdateSeq],
+            couch_log:info("Starting compaction for db \"~s\" at ~p", Args),
             {ok, Db2} = couch_db_engine:start_compaction(Db),
             ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
             {noreply, Db2};
