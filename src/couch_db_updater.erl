@@ -681,7 +681,7 @@ make_doc_summary(Db, DocParts) ->
 
 pair_write_info(Old, New) ->
     lists:map(fun(FDI) ->
-        case lists:keysearch(FDI#full_doc_info.id, #full_doc_info.id, Old) of
+        case lists:keyfind(FDI#full_doc_info.id, #full_doc_info.id, Old) of
             #full_doc_info{} = OldFDI -> {OldFDI, FDI};
             false -> {not_found, FDI}
         end
@@ -690,7 +690,7 @@ pair_write_info(Old, New) ->
 
 pair_purge_info(Old, New) ->
     lists:map(fun(OldFDI) ->
-        case lists:keysearch(OldFDI#full_doc_info.id, #full_doc_info.id, New) of
+        case lists:keyfind(OldFDI#full_doc_info.id, #full_doc_info.id, New) of
             #full_doc_info{} = NewFDI -> {OldFDI, NewFDI};
             false -> {OldFDI, not_found}
         end
