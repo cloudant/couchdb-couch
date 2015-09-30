@@ -339,12 +339,12 @@ commit_data(St) ->
             ok = couch_file:write_header(Fd, NewHeader),
             if After -> couch_file:sync(Fd); true -> ok end,
 
-            St#st{
+            {ok, St#st{
                 header = NewHeader,
                 needs_commit = false
-            };
+            }};
         false ->
-            St
+            {ok, St}
     end.
 
 
@@ -624,7 +624,8 @@ init_state(FilePath, Fd, Header0, Options) ->
     % uuid each time it was reopened.
     case Header /= Header0 of
         true ->
-            commit_data(St);
+            {ok, NewSt} = commit_data(St),
+            NewSt;
         false ->
             St
     end.
@@ -780,7 +781,7 @@ finish_compaction_int(#st{} = OldSt, #st{} = NewSt1) ->
 
     CompactedSeq = ?MODULE:get(OldSt, update_seq),
     {ok, NewSt2} = ?MODULE:set(NewSt1, compacted_seq, CompactedSeq),
-    NewSt3 = commit_data(NewSt2#st{
+    {ok, NewSt3} = commit_data(NewSt2#st{
         local_tree = NewLocal2
     }),
 
