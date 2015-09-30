@@ -33,7 +33,7 @@ foldl({Fd, [Bin | Rest]}, Fun, Acc) when is_binary(Bin) ->
     foldl({Fd, Rest}, Fun, Fun(Bin, Acc));
 
 foldl({Fd, [Pos | Rest]}, Fun, Acc) when is_integer(Pos) ->
-    {ok, Bin} = couch_file:pread_iolist(Fd, Pos),
+    {ok, Bin} = couch_file:pread_binary(Fd, Pos),
     foldl({Fd, Rest}, Fun, Fun(Bin, Acc)).
 
 
@@ -46,7 +46,7 @@ seek({Fd, [{Pos, Length} | Rest]}, Offset) ->
     end;
 
 seek({Fd, [Pos | Rest]}, Offset) when is_integer(Pos) ->
-    {ok, Bin} = couch_file:pread_iolist(Fd, Pos),
+    {ok, Bin} = couch_file:pread_binary(Fd, Pos),
     case iolist_size(Bin) =< Offset of
         true ->
             seek({Fd, Rest}, Offset - size(Bin));
