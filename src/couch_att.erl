@@ -18,7 +18,8 @@
     fetch/2,
     store/2,
     store/3,
-    transform/3
+    transform/3,
+    copy/2
 ]).
 
 -export([
@@ -231,6 +232,15 @@ store(Field, Value, Att) ->
 transform(Field, Fun, Att) ->
     NewValue = Fun(fetch(Field, Att)),
     store(Field, NewValue, Att).
+
+
+copy(Att, DstStream) ->
+    [{stream, SrcStream}, AttLen, OldMd5] = fetch([data, att_len, md5], Att),
+    ok = couch_stream:copy(SrcStream, DstStream),
+    {NewStream, AttLen, _, NewMd5, _} = couch_stream:close(DstStream),
+    couch_util:check_md5(OldMd5, NewMd5),
+    NewBinSp = couch_stream:to_disk_term(NewStream),
+    store(data, NewBinSp, Att).
 
 
 is_stub(Att) ->
