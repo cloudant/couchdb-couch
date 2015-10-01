@@ -616,12 +616,12 @@ deleted_filename(Original) ->
 
 get_configured_engines() ->
     ConfigEntries = config:get("couchdb_engines"),
-    Engines = lists:flatmap(fun({Extension, Module}) ->
+    Engines = lists:flatmap(fun({Extension, ModuleStr}) ->
         try
-            Module = list_to_atom(Module),
-            {module, _} = code:load_file(Module),
+            Module = list_to_atom(ModuleStr),
+            {module, Module} = code:load_file(Module),
             [{Extension, Module}]
-        catch _:_ ->
+        catch _T:_R ->
             []
         end
     end, ConfigEntries),
@@ -665,7 +665,7 @@ get_default_engine(Server, DbName) ->
     Default = {couch_bt_engine, make_filepath(RootDir, DbName, "couch")},
     case config:get("couchdb", "default_engine") of
         Extension when is_list(Extension) ->
-            case lists:keysearch(Extension, 1, Engines) of
+            case lists:keyfind(Extension, 1, Engines) of
                 {Extension, Module} ->
                     {Module, make_filepath(RootDir, DbName, Extension)};
                 false ->
