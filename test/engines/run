@@ -1,0 +1,209 @@
+#!/usr/bin/env python
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy of
+# the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations under
+# the License.
+
+import glob
+import optparse as op
+import os
+import re
+import shutil
+import subprocess as sp
+import sys
+import time
+
+
+USAGE = "%prog EngineApp [EngineMod]"
+TEST_PATH = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(TEST_PATH, "data")
+ROOT_DIR = os.path.join(TEST_PATH, "..", "..", "..", "..")
+ROOT_DIR = os.path.abspath(ROOT_DIR)
+
+
+ERLANG_VM = None
+
+
+def clean_data_dir():
+    data_dir = os.path.join(TEST_PATH, "data")
+    if os.path.exists(data_dir):
+        shutil.rmtree(data_dir)
+
+
+def clean_log_dir():
+    log_dir = os.path.join(TEST_PATH, "log")
+    if os.path.exists(log_dir):
+        shutil.rmtree(log_dir)
+
+
+def init_beams():
+    apps = os.path.join(ROOT_DIR, "src")
+    env = os.environ.copy()
+    env["ERL_LIBS"] = os.pathsep.join([apps])
+    support_files = glob.glob(os.path.join(TEST_PATH, "*.erl"))
+    test_files = glob.glob(os.path.join(TEST_PATH, "tests", "*.erl"))
+    for fname in support_files + test_files:
+        try:
+            cmd = [
+                "erlc",
+                "-o", os.path.dirname(fname) + os.sep,
+                fname
+            ]
+            sp.check_call(cmd, env=env)
+        except:
+            print "Error compiling: " + fname
+            exit(1)
+
+
+def hack_default_ini(opts, args, contents):
+    # Replace log file
+    logdir = os.path.join(TEST_PATH, "log")
+    if not os.path.exists(logdir):
+        os.makedirs(logdir)
+    logfile = os.path.join(logdir, "engine_test.log")
+    repl = "file = %s" % logfile
+    contents = re.sub("(?m)^file.*$", repl, contents)
+
+    # Replace couchjs command
+    couchjs = os.path.join(ROOT_DIR, "src", "couch", "priv", "couchjs")
+    mainjs = os.path.join(ROOT_DIR, "support", "main.js")
+    coffeejs = os.path.join(ROOT_DIR, "support", "main-coffee.js")
+
+    repl = "javascript = %s %s" % (couchjs, mainjs)
+    contents = re.sub("(?m)^javascript.*$", repl, contents)
+
+    repl = "coffeescript = %s %s" % (couchjs, coffeejs)
+    contents = re.sub("(?m)^coffeescript.*$", repl, contents)
+
+    return contents
+
+
+def hack_local_ini(opts, args, contents):
+    return contents
+
+
+def write_sys_config(tgt_dir):
+    contents = """
+    [
+        {lager, [
+            {error_logger_hwm, 1000},
+            {error_logger_redirect, true},
+            {handlers, [
+                {lager_file_backend, [
+                    {file, "log/info.log"},
+                    {level, info}
+                ]}
+            ]}
+        ]}
+    ].
+    """
+    with open(os.path.join(tgt_dir, "sys.config"), "w") as handle:
+        handle.write(contents)
+
+
+def write_config(opts):
+    datadir = os.path.join(TEST_PATH, "data")
+    if not os.path.exists(datadir):
+        os.makedirs(datadir)
+    args = {
+        "prefix": ROOT_DIR,
+        "package_author_name": "The Apache Software Foundation",
+        "data_dir": os.path.join(TEST_PATH, "data", "dbs"),
+        "view_index_dir": os.path.join(TEST_PATH, "data", "views"),
+        "geo_index_dir": os.path.join(TEST_PATH, "data", "geo"),
+        "node_name": "test_engine@127.0.0.1",
+        "cluster_port": '5984',
+        "backend_port" : '5986'
+    }
+
+    etc_src = os.path.join(ROOT_DIR, "rel", "overlay", "etc")
+    etc_tgt = os.path.join(TEST_PATH, "etc")
+
+    if not os.path.exists(etc_tgt):
+        os.makedirs(etc_tgt)
+
+    etc_files = glob.glob(os.path.join(etc_src, "*"))
+    for fname in etc_files:
+        base = os.path.basename(fname)
+        tgt = os.path.join(etc_tgt, base)
+        with open(fname) as handle:
+            contents = handle.read()
+        for key in args:
+            contents = re.sub("{{%s}}" % key, args[key], contents)
+        if base == "default.ini":
+            contents = hack_default_ini(opts, args, contents)
+        elif base == "local.ini":
+            contents = hack_local_ini(opts, args, contents)
+        with open(tgt, "w") as handle:
+            handle.write(contents)
+
+    write_sys_config(etc_tgt)
+
+
+def start_test(engine_app, engine_mod):
+    apps = os.path.join(ROOT_DIR, "src")
+    env = os.environ.copy()
+    env["ERL_LIBS"] = os.pathsep.join([apps])
+    cmd = [
+        "erl",
+        "-args_file", os.path.join(TEST_PATH, "etc", "vm.args"),
+        "-config", os.path.join(TEST_PATH, "etc", "sys"),
+        "-couch_ini",
+            os.path.join(TEST_PATH, "etc", "default.ini"),
+            os.path.join(TEST_PATH, "etc", "local.ini"),
+        "-parent_pid", str(os.getpid()),
+        "-engine_app", engine_app,
+        "-engine_mod", engine_mod,
+        "-engine_tests", os.path.join(TEST_PATH, "tests"),
+        "-pa", TEST_PATH,
+        "-pa", os.path.join(TEST_PATH, "tests"),
+        "-s", "test_engine"
+    ]
+    return sp.Popen(
+            cmd,
+            stdin=sp.PIPE,
+            stdout=sys.stdout,
+            stderr=sp.STDOUT,
+            env=env)
+
+
+def main():
+    parser = op.OptionParser(usage=USAGE)
+    opts, args = parser.parse_args()
+
+    if len(args) == 1:
+        args = [args[0], args[0]]
+
+    if len(args) != 2:
+        parser.error("Missing engine app and/or module to test.")
+
+    clean_data_dir()
+    clean_log_dir()
+    init_beams()
+    write_config(opts)
+
+    pipe = start_test(args[0], args[1])
+    try:
+        while True:
+            pipe.poll()
+            if pipe.returncode is not None:
+                exit(pipe.returncode)
+            time.sleep(1)
+    finally:
+        if pipe.returncode is None:
+            pipe.kill()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
