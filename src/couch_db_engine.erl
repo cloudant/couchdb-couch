@@ -299,6 +299,9 @@ monitored_by(#db{} = Db) ->
     Engine:monitored_by(EngineState).
 
 
+get(#db{} = Db, epochs) ->
+    get(Db, epochs, []);
+
 get(#db{} = Db, Property) ->
     get(Db, Property, undefined).
 

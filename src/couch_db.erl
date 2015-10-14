@@ -41,7 +41,7 @@
 -export([validate_dbname/1]).
 
 
--export([is_db/1]).
+-export([is_db/1, is_clustered_db/1]).
 -export([open_write_stream/2, open_read_stream/2, is_active_stream/2]).
 
 -include_lib("couch/include/couch_db.hrl").
@@ -116,6 +116,10 @@ shutdown(#db{} = Db) ->
 is_db(#cdb{}) -> true;
 is_db(#db{}) -> true;
 is_db(_Else) -> false.
+
+
+is_clustered_db(#cdb{}) -> true;
+is_clustered_db(_Else) -> false.
 
 
 pid(#db{} = Db) ->
@@ -334,16 +338,16 @@ get_update_seq(#db{} = Db)->
     couch_db_engine:get(Db, update_seq).
 
 get_purge_seq(#db{}=Db) ->
-    couch_db_engine:get(Db, purge_seq).
+    {ok, couch_db_engine:get(Db, purge_seq)}.
 
 get_last_purged(#db{}=Db) ->
-    couch_db_engine:get(Db, last_purged).
+    {ok, couch_db_engine:get(Db, last_purged)}.
 
 get_doc_count(Db) ->
-    couch_db_engine:get(Db, doc_count).
+    {ok, couch_db_engine:get(Db, doc_count)}.
 
 get_del_doc_count(Db) ->
-    couch_db_engine:get(Db, del_doc_count).
+    {ok, couch_db_engine:get(Db, del_doc_count)}.
 
 get_uuid(#db{}=Db) ->
     couch_db_engine:get(Db, uuid).
@@ -364,8 +368,8 @@ get_db_info(Db) ->
         instance_start_time = StartTime,
         committed_update_seq=CommittedUpdateSeq
     } = Db,
-    DocCount = get_doc_count(Db),
-    DelDocCount = get_del_doc_count(Db),
+    {ok, DocCount} = get_doc_count(Db),
+    {ok, DelDocCount} = get_del_doc_count(Db),
     SizeInfo = couch_db_engine:get(Db, size_info),
     DiskVersion = couch_db_engine:get(Db, disk_version),
     Uuid = case get_uuid(Db) of
@@ -1425,6 +1429,10 @@ make_doc(#db{} = Db, Id, Deleted, Bp, RevisionPath) ->
 after_doc_read(#db{} = Db, Doc) ->
     DocWithBody = couch_doc:with_ejson_body(Doc),
     couch_db_plugin:after_doc_read(Db, DocWithBody).
+
+
+increment_stat(#cdb{}, Stat) ->
+    couch_stats:increment_counter(Stat);
 
 increment_stat(#db{options = Options}, Stat) ->
     case lists:member(sys_db, Options) of

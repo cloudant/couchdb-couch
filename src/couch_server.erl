@@ -618,9 +618,7 @@ get_configured_engines() ->
     ConfigEntries = config:get("couchdb_engines"),
     Engines = lists:flatmap(fun({Extension, ModuleStr}) ->
         try
-            Module = list_to_atom(ModuleStr),
-            {module, Module} = code:load_file(Module),
-            [{Extension, Module}]
+            [{Extension, list_to_atom(ModuleStr)}]
         catch _T:_R ->
             []
         end

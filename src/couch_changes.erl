@@ -334,9 +334,23 @@ check_docids(_) ->
 
 
 open_ddoc(Db, DDocId) ->
-    case couch_db:open_doc(Db, DDocId, [ejson_body]) of
-        {ok, _} = Resp -> Resp;
-        Else -> throw(Else)
+    case couch_db:is_clustered_db(Db) of
+        true ->
+            {_, Ref} = spawn_monitor(fun() ->
+                DbName = mem3:dbname(couch_db:name(Db)),
+                exit(fabric:open_doc(DbName, DDocId, [ejson_body]))
+            end),
+            receive
+                {'DOWN', Ref, _, _, {ok, _}=Response} ->
+                    Response;
+                {'DOWN', Ref, _, _, Response} ->
+                    throw(Response)
+            end;
+        false ->
+            case couch_db:open_doc(Db, DDocId, [ejson_body]) of
+                {ok, _} = Resp -> Resp;
+                Else -> throw(Else)
+            end
     end.
 
 
