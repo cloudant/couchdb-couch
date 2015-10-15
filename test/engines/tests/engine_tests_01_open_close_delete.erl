@@ -1,10 +1,15 @@
 -module(engine_tests_01_open_close_delete).
+-compile(export_all).
 
 
 -include_lib("eunit/include/eunit.hrl").
 
 
-open_non_existent_test() ->
+open_close_delete_test_() ->
+    test_engine_util:gather(?MODULE).
+
+
+cet_open_non_existent() ->
     Engine = test_engine_util:get_engine(),
     DbPath = test_engine_util:dbpath(),
 
@@ -13,7 +18,7 @@ open_non_existent_test() ->
     ?assertEqual(false, Engine:exists(DbPath)).
 
 
-open_create_test() ->
+cet_open_create() ->
     Engine = test_engine_util:get_engine(),
     DbPath = test_engine_util:dbpath(),
 
@@ -22,7 +27,7 @@ open_create_test() ->
     ?assertEqual(true, Engine:exists(DbPath)).
 
 
-open_when_exists_test() ->
+cet_open_when_exists() ->
     Engine = test_engine_util:get_engine(),
     DbPath = test_engine_util:dbpath(),
 
@@ -31,7 +36,7 @@ open_when_exists_test() ->
     ?assertThrow({error, eexist}, Engine:init(DbPath, [create])).
 
 
-terminate_test() ->
+cet_terminate() ->
     Engine = test_engine_util:get_engine(),
     DbPath = test_engine_util:dbpath(),
 
@@ -41,7 +46,7 @@ terminate_test() ->
     ?assertEqual(true, Engine:exists(DbPath)).
 
 
-rapid_recycle_test() ->
+cet_rapid_recycle() ->
     Engine = test_engine_util:get_engine(),
     DbPath = test_engine_util:dbpath(),
 
@@ -54,7 +59,7 @@ rapid_recycle_test() ->
     end, lists:seq(1, 100)).
 
 
-delete_test() ->
+cet_delete() ->
     Engine = test_engine_util:get_engine(),
     RootDir = test_engine_util:rootdir(),
     DbPath = test_engine_util:dbpath(),
