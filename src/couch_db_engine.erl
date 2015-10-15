@@ -105,10 +105,10 @@
 
 
 -callback make_doc_summary(DbHandle::db_handle(), DocParts::any()) ->
-        binary().
+        any().
 
 
--callback write_doc_summary(DbHandle::db_handle(), DocSummary::binary()) ->
+-callback write_doc_summary(DbHandle::db_handle(), DocSummary::any()) ->
         {ok, DocPtr::any(), SummarySize::non_neg_integer()}.
 
 
