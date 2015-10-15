@@ -1,9 +1,15 @@
 -module(engine_tests_02_get_set_props).
+-compile(export_all).
+
 
 -include_lib("eunit/include/eunit.hrl").
 
 
-default_props_test() ->
+get_set_props_test_() ->
+    test_engine_util:gather(?MODULE).
+
+
+cet_default_props() ->
     Engine = test_engine_util:get_engine(),
     DbPath = test_engine_util:dbpath(),
 
@@ -11,6 +17,9 @@ default_props_test() ->
 
     Node = node(),
 
+    ?assertEqual(0, Engine:get(St, doc_count)),
+    ?assertEqual(0, Engine:get(St, del_doc_count)),
+    ?assertEqual(true, is_list(Engine:get(St, size_info))),
     ?assertEqual(true, is_integer(Engine:get(St, disk_version))),
     ?assertEqual(0, Engine:get(St, update_seq)),
     ?assertEqual(0, Engine:get(St, purge_seq)),
@@ -22,15 +31,15 @@ default_props_test() ->
     ?assertEqual(0, Engine:get(St, compacted_seq)).
 
 
-set_security_test() ->
+cet_set_security() ->
     check_prop_set(security, [], [{<<"readers">>, []}]).
 
 
-set_revs_limit_test() ->
+cet_set_revs_limit() ->
     check_prop_set(revs_limit, 1000, 50).
 
 
-set_epochs_test() ->
+cet_set_epochs() ->
     TestValue = [
         {'other_node@127.0.0.1', 0},
         {node(), 0}
@@ -46,7 +55,7 @@ set_epochs_test() ->
     check_prop_set(epochs, [{node(), 0}], TestValue, CommittedValue).
 
 
-set_compact_seq_test() ->
+cet_set_compact_seq() ->
     check_prop_set(compacted_seq, 0, 12).
 
 
