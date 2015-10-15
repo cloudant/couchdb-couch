@@ -308,7 +308,16 @@ write_doc_infos(#st{} = St, Pairs, LocalDocs, PurgedIdRevs) ->
     {Add, RemIds, RemSeqs} = FinalAcc,
     {ok, IdTree2} = couch_btree:add_remove(IdTree, Add, RemIds),
     {ok, SeqTree2} = couch_btree:add_remove(SeqTree, Add, RemSeqs),
-    {ok, LocalTree2} = couch_btree:add_remove(LocalTree, LocalDocs, []),
+
+    {AddLDocs, RemLDocIds} = lists:foldl(fun(Doc, {AddAcc, RemAcc}) ->
+        case Doc#doc.deleted of
+            true ->
+                {AddAcc, [Doc#doc.id | RemAcc]};
+            false ->
+                {[Doc | AddAcc], RemAcc}
+        end
+    end, {[], []}, LocalDocs),
+    {ok, LocalTree2} = couch_btree:add_remove(LocalTree, AddLDocs, RemLDocIds),
 
     NewUpdateSeq = lists:foldl(fun(#full_doc_info{update_seq=Seq}, Acc) ->
         erlang:max(Seq, Acc)
