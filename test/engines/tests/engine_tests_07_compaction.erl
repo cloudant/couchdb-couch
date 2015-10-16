@@ -1,1 +1,1 @@
--module(engine_tests_06_compaction).
+-module(engine_tests_07_compaction).

@@ -66,7 +66,7 @@ apply_action(Engine, St, Action) ->
 apply_batch(Engine, St, Actions) ->
     UpdateSeq = Engine:get(St, update_seq) + 1,
     AccIn = {UpdateSeq, [], []},
-    AccOut = lists:foldr(fun(Action, Acc) ->
+    AccOut = lists:foldl(fun(Action, Acc) ->
         {SeqAcc, DocAcc, LDocAcc} = Acc,
         case Action of
             {_, {<<"_local/", _/binary>>, _}} ->
@@ -77,7 +77,8 @@ apply_batch(Engine, St, Actions) ->
                 {SeqAcc + 1, [Doc | DocAcc], LDocAcc}
         end
     end, AccIn, Actions),
-    {_, Docs, LDocs} = AccOut,
+    {_, Docs0, LDocs} = AccOut,
+    Docs = lists:reverse(Docs0),
     {ok, NewSt} = Engine:write_doc_infos(St, Docs, LDocs, []),
     NewSt.
 
