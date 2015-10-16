@@ -44,6 +44,12 @@ def clean_log_dir():
         shutil.rmtree(log_dir)
 
 
+def clean_cover_dir():
+    cover_dir = os.path.join(TEST_PATH, "coverage")
+    if os.path.exists(cover_dir):
+        shutil.rmtree(cover_dir)
+
+
 def init_beams():
     apps = os.path.join(ROOT_DIR, "src")
     env = os.environ.copy()
@@ -54,6 +60,7 @@ def init_beams():
         try:
             cmd = [
                 "erlc",
+                "+debug_info",
                 "-o", os.path.dirname(fname) + os.sep,
                 fname
             ]
@@ -148,7 +155,7 @@ def write_config(opts):
     write_sys_config(etc_tgt)
 
 
-def start_test(engine_app, engine_mod):
+def start_test(opts, engine_app, engine_mod):
     apps = os.path.join(ROOT_DIR, "src")
     env = os.environ.copy()
     env["ERL_LIBS"] = os.pathsep.join([apps])
@@ -165,6 +172,7 @@ def start_test(engine_app, engine_mod):
         "-engine_tests", os.path.join(TEST_PATH, "tests"),
         "-pa", TEST_PATH,
         "-pa", os.path.join(TEST_PATH, "tests"),
+        "-cover_engine", str(opts.cover).lower(),
         "-s", "test_engine"
     ]
     return sp.Popen(
@@ -175,8 +183,15 @@ def start_test(engine_app, engine_mod):
             env=env)
 
 
+def options():
+    return [
+        op.make_option("-c", "--cover", default=False, action="store_true",
+            help="Run with code coverage")
+    ]
+
+
 def main():
-    parser = op.OptionParser(usage=USAGE)
+    parser = op.OptionParser(usage=USAGE, option_list=options())
     opts, args = parser.parse_args()
 
     if len(args) == 1:
@@ -187,10 +202,12 @@ def main():
 
     clean_data_dir()
     clean_log_dir()
+    if opts.cover:
+        clean_cover_dir()
     init_beams()
     write_config(opts)
 
-    pipe = start_test(args[0], args[1])
+    pipe = start_test(opts, args[0], args[1])
     try:
         while True:
             pipe.poll()

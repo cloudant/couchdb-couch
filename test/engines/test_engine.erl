@@ -29,6 +29,7 @@ start() ->
 run(EngineApp, EngineMod) ->
     application:set_env(couch, test_engine, {EngineApp, EngineMod}),
     {ok, [[TestDir]]} = init:get_argument(engine_tests),
+    {ok, CoverSt} = test_engine_cover:init(EngineApp, TestDir),
     Glob = filename:join(TestDir, "*.beam"),
     Files = filelib:wildcard(Glob),
     Tests = lists:map(fun(FileName) ->
@@ -36,8 +37,10 @@ run(EngineApp, EngineMod) ->
         list_to_atom(BaseName)
     end, lists:sort(Files)),
     case eunit:test(Tests, [verbose]) of
-        ok -> ok;
-        error -> init:stop(2)
+        ok ->
+            test_engine_cover:finish(CoverSt);
+        error ->
+            init:stop(2)
     end.
 
 
