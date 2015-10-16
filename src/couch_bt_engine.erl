@@ -390,28 +390,11 @@ is_active_stream(_, _) ->
 
 
 fold_docs(St, UserFun, UserAcc, Options) ->
-    Fun = fun skip_deleted/4,
-    RedFun = case lists:member(include_reductions, Options) of
-        true -> fun include_reductions/4;
-        false -> fun drop_reductions/4
-    end,
-    InAcc = {RedFun, {UserFun, UserAcc}},
-    {ok, Reds, OutAcc} = couch_btree:fold(St#st.id_tree, Fun, InAcc, Options),
-    {_, {_, FinalUserAcc}} = OutAcc,
-    case lists:member(include_reductions, Options) of
-        true ->
-            {ok, fold_docs_reduce_to_count(Reds), FinalUserAcc};
-        false ->
-            {ok, FinalUserAcc}
-    end.
+    fold_docs_int(St#st.id_tree, UserFun, UserAcc, Options).
 
 
 fold_local_docs(St, UserFun, UserAcc, Options) ->
-    Fun = fun skip_deleted/4,
-    InAcc = {UserFun, UserAcc},
-    {ok, _, OutAcc} = couch_btree:fold(St#st.local_tree, Fun, InAcc, Options),
-    {_, FinalUserAcc} = OutAcc,
-    {ok, FinalUserAcc}.
+    fold_docs_int(St#st.local_tree, UserFun, UserAcc, Options).
 
 
 fold_changes(St, SinceSeq, UserFun, UserAcc, Options) ->
@@ -756,6 +739,23 @@ active_size(#st{} = St, #size_info{} = SI) ->
                 Acc + Size
         end
     end, SI#size_info.active, Trees).
+
+
+fold_docs_int(Tree, UserFun, UserAcc, Options) ->
+    Fun = fun skip_deleted/4,
+    RedFun = case lists:member(include_reductions, Options) of
+        true -> fun include_reductions/4;
+        false -> fun drop_reductions/4
+    end,
+    InAcc = {RedFun, {UserFun, UserAcc}},
+    {ok, Reds, OutAcc} = couch_btree:fold(Tree, Fun, InAcc, Options),
+    {_, {_, FinalUserAcc}} = OutAcc,
+    case lists:member(include_reductions, Options) of
+        true ->
+            {ok, fold_docs_reduce_to_count(Reds), FinalUserAcc};
+        false ->
+            {ok, FinalUserAcc}
+    end.
 
 
 % First element of the reductions is the total
