@@ -331,8 +331,11 @@ write_doc_infos(#st{} = St, Pairs, LocalDocs, PurgedIdRevs) ->
         _ ->
             {ok, Ptr} = couch_file:append_term(St#st.fd, PurgedIdRevs),
             OldPurgeSeq = couch_bt_engine_header:get(St#st.header, purge_seq),
+            % We bump NewUpdateSeq because we have to ensure that
+            % indexers see that they need to process the new purge
+            % information.
             couch_bt_engine_header:set(St#st.header, [
-                {update_seq, NewUpdateSeq},
+                {update_seq, NewUpdateSeq + 1},
                 {purge_seq, OldPurgeSeq + 1},
                 {purged_docs, Ptr}
             ])
