@@ -347,9 +347,10 @@ to_disk_term(Att) ->
 %% compression to remove these sorts of common bits (block level compression
 %% with something like a shared dictionary that is checkpointed every now and
 %% then).
-from_disk_term(Db, {Base, Extended}) when is_tuple(Base), is_list(Extended) ->
-    store(Extended, from_disk_term(Db, Base));
-from_disk_term(Db, {Name,Type,Sp,AttLen,DiskLen,RevPos,Md5,Enc}) ->
+from_disk_term(StreamSrc, {Base, Extended})
+        when is_tuple(Base), is_list(Extended) ->
+    store(Extended, from_disk_term(StreamSrc, Base));
+from_disk_term(StreamSrc, {Name,Type,Sp,AttLen,DiskLen,RevPos,Md5,Enc}) ->
     #att{
         name=Name,
         type=Type,
@@ -357,10 +358,10 @@ from_disk_term(Db, {Name,Type,Sp,AttLen,DiskLen,RevPos,Md5,Enc}) ->
         disk_len=DiskLen,
         md5=Md5,
         revpos=RevPos,
-        data={stream, couch_db:open_read_stream(Db, Sp)},
+        data={stream, open_stream(StreamSrc, Sp)},
         encoding=upgrade_encoding(Enc)
     };
-from_disk_term(Db, {Name,Type,Sp,AttLen,RevPos,Md5}) ->
+from_disk_term(StreamSrc, {Name,Type,Sp,AttLen,RevPos,Md5}) ->
     #att{
         name=Name,
         type=Type,
@@ -368,9 +369,9 @@ from_disk_term(Db, {Name,Type,Sp,AttLen,RevPos,Md5}) ->
         disk_len=AttLen,
         md5=Md5,
         revpos=RevPos,
-        data={stream, couch_db:open_read_stream(Db, Sp)}
+        data={stream, open_stream(StreamSrc, Sp)}
     };
-from_disk_term(Db, {Name,{Type,Sp,AttLen}}) ->
+from_disk_term(StreamSrc, {Name,{Type,Sp,AttLen}}) ->
     #att{
         name=Name,
         type=Type,
@@ -378,7 +379,7 @@ from_disk_term(Db, {Name,{Type,Sp,AttLen}}) ->
         disk_len=AttLen,
         md5= <<>>,
         revpos=0,
-        data={stream,couch_db:open_read_stream(Db, Sp)}
+        data={stream,open_stream(StreamSrc, Sp)}
     }.
 
 
@@ -694,6 +695,20 @@ downgrade(Att) ->
 upgrade_encoding(true) -> gzip;
 upgrade_encoding(false) -> identity;
 upgrade_encoding(Encoding) -> Encoding.
+
+
+open_stream(StreamSrc, Data) ->
+    case couch_db:is_db(StreamSrc) of
+        true ->
+            couch_db:open_read_stream(StreamSrc, Data);
+        false ->
+            case is_function(StreamSrc, 1) of
+                true ->
+                    StreamSrc(Data);
+                false ->
+                    erlang:error({invalid_stream_source, StreamSrc})
+            end
+    end.
 
 
 -ifdef(TEST).
