@@ -61,6 +61,17 @@ cet_fold_stop_local() ->
     fold_stop(fold_local_docs, fun local_docid/1).
 
 
+% This is a loose test but we have to have this until
+% I figure out what to do about the total_rows/offset
+% meta data included in _all_docs
+cet_fold_include_reductions() ->
+    {ok, Engine, St} = init_st(fun docid/1),
+    FoldFun = fun(_, _, nil) -> {ok, nil} end,
+    {ok, Count, nil} = Engine:fold_docs(St, FoldFun, nil, [include_reductions]),
+    ?assert(is_integer(Count)),
+    ?assert(Count >= 0).
+
+
 fold_all(FoldFun, DocIdFun) ->
     DocIds = [DocIdFun(I) || I <- lists:seq(1, ?NUM_DOCS)],
     {ok, Engine, St} = init_st(DocIdFun),
