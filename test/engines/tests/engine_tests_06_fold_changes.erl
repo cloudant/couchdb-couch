@@ -110,7 +110,6 @@ cet_update_second_of_two() ->
     ?assertEqual(2, Engine:count_changes_since(St2, 0)),
     {ok, Changes} = Engine:fold_changes(St2, 0, fun fold_fun/2, [], []),
     ?assertEqual([{<<"a">>, 1}, {<<"b">>, 3}], lists:reverse(Changes)).
-    
 
 
 cet_check_mutation_ordering() ->
@@ -134,18 +133,24 @@ cet_check_mutation_ordering() ->
                 {dir, rev}
             ]),
         ?assertEqual(lists:sublist(DocSeqs, Seq + 1), Prefix)
-    end, lists:seq(0, ?NUM_DOCS)).
-    % 
-    % % Update each document once ensuring
-    % % we have a correct ordering after every
-    % % update.
-    % Fun = fun
-    %     (St, [], _) ->
-    %         St;
-    %     (St, Remain, Rest) ->
-    %         {{DocId, _}, RestRemain} = remove_random(Remain),
-    %         Action = {update, {DocId, []}},
-    %         {ok, NewSt} = 
+    end, lists:seq(0, ?NUM_DOCS)),
+
+    ok = do_mutation_ordering(Engine, St2, ?NUM_DOCS + 1, DocSeqs, []).
+
+
+do_mutation_ordering(Engine, St, _Seq, [], FinalDocSeqs) ->
+    {ok, RevOrder} = Engine:fold_changes(St, 0, fun fold_fun/2, [], []),
+    ?assertEqual(FinalDocSeqs, lists:reverse(RevOrder)),
+    ok;
+
+do_mutation_ordering(Engine, St, Seq, [{DocId, _OldSeq} | Rest], DocSeqAcc) ->
+    Actions = [{update, {DocId, []}}],
+    {ok, NewSt} = test_engine_util:apply_actions(Engine, St, Actions),
+    NewAcc = DocSeqAcc ++ [{DocId, Seq}],
+    Expected = Rest ++ NewAcc,
+    {ok, RevOrder} = Engine:fold_changes(NewSt, 0, fun fold_fun/2, [], []),
+    ?assertEqual(Expected, lists:reverse(RevOrder)),
+    do_mutation_ordering(Engine, NewSt, Seq + 1, Rest, NewAcc).
 
 
 shuffle(List) ->
@@ -175,15 +180,3 @@ fold_fun(#full_doc_info{id=Id, update_seq=Seq}, Acc) ->
 docid(I) ->
     Str = io_lib:format("~4..0b", [I]),
     iolist_to_binary(Str).
-
-
-% mutation test ->
-%     create 100 docs in random order
-%     check fold/count starting at every update seq
-%     randomly select doc,
-%         mutate,
-%         add to new set
-%         check order
-%         check rev order
-%         repeat until first set is empty
-%     
