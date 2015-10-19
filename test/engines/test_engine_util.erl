@@ -109,8 +109,9 @@ gen_local_write(Engine, St, {Action, {DocId, Body}}) ->
 gen_write(Engine, St, {Action, {DocId, Body}}, UpdateSeq) ->
     gen_write(Engine, St, {Action, {DocId, Body, []}}, UpdateSeq);
 
-gen_write(Engine, St, {create, {DocId, Body, Atts}}, UpdateSeq) ->
+gen_write(Engine, St, {create, {DocId, Body, Atts0}}, UpdateSeq) ->
     [not_found] = Engine:open_docs(St, [DocId]),
+    Atts = [couch_att:to_disk_term(Att) || Att <- Atts0],
 
     Rev = crypto:hash(md5, term_to_binary({DocId, Body, Atts})),
     Summary = make_doc_summary(Engine, St, {Body, Atts}),
@@ -137,8 +138,9 @@ gen_write(Engine, St, {create, {DocId, Body, Atts}}, UpdateSeq) ->
         sizes = Sizes
     }};
 
-gen_write(Engine, St, {Action, {DocId, Body, Atts}}, UpdateSeq) ->
+gen_write(Engine, St, {Action, {DocId, Body, Atts0}}, UpdateSeq) ->
     [#full_doc_info{} = PrevFDI] = Engine:open_docs(St, [DocId]),
+    Atts = [couch_att:to_disk_term(Att) || Att <- Atts0],
 
     #full_doc_info{
         id = DocId,
@@ -198,9 +200,51 @@ make_doc_summary(Engine, St, DocData) ->
     end.
 
 
+prep_atts(_Engine, _St, []) ->
+    [];
+
+prep_atts(Engine, St, [{FileName, Data} | Rest]) ->
+    {_, Ref} = spawn_monitor(fun() ->
+        {ok, Stream} = Engine:open_write_stream(St, []),
+        exit(write_att(Stream, FileName, Data, Data))
+    end),
+    Att = receive
+        {'DOWN', Ref, _, _, Resp} ->
+            Resp
+        after 5000 ->
+            erlang:error(attachment_write_timeout)
+    end,
+    [Att | prep_atts(Engine, St, Rest)].
+
+
+write_att(Stream, FileName, OrigData, <<>>) ->
+    {StreamEngine, Len, Len, Md5, Md5} = couch_stream:close(Stream),
+    couch_util:check_md5(Md5, crypto:hash(md5, OrigData)),
+    Len = size(OrigData),
+    couch_att:new([
+        {name, FileName},
+        {type, <<"application/octet-stream">>},
+        {data, {stream, StreamEngine}},
+        {att_len, Len},
+        {disk_len, Len},
+        {md5, Md5},
+        {encoding, identity}
+    ]);
+
+write_att(Stream, FileName, OrigData, Data) ->
+    {Chunk, Rest} = case size(Data) > 4096 of
+        true ->
+            <<Head:4096/binary, Tail/binary>> = Data,
+            {Head, Tail};
+        false ->
+            {Data, <<>>}
+    end,
+    ok = couch_stream:write(Stream, Chunk),
+    write_att(Stream, FileName, OrigData, Rest).
+    
+
 prev_rev(#full_doc_info{} = FDI) ->
     #doc_info{
         revs = [#rev_info{} = PrevRev]
     } = couch_doc:to_doc_info(FDI),
     PrevRev.
-    
