@@ -13,12 +13,16 @@ attachments_test_() ->
 cet_write_attachment() ->
     {ok, Engine, DbPath, St1} = test_engine_util:init_engine(dbpath),
 
-    AttBin = <<"Hello, World!\n">>,
+    AttBin = crypto:rand_bytes(32768),
 
-    Atts = test_engine_util:prep_atts(Engine, St1, [
+    [Att0] = test_engine_util:prep_atts(Engine, St1, [
             {<<"ohai.txt">>, AttBin}
         ]),
-    Actions = [{create, {<<"first">>, [], Atts}}],
+
+    {stream, Stream} = couch_att:fetch(data, Att0),
+    ?assertEqual(true, Engine:is_active_stream(St1, Stream)),
+
+    Actions = [{create, {<<"first">>, [], [Att0]}}],
     {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions),
     {ok, St3} = Engine:commit_data(St2),
     Engine:terminate(normal, St3),
@@ -35,10 +39,29 @@ cet_write_attachment() ->
     end,
 
     StreamSrc = fun(Sp) -> Engine:open_read_stream(St4, Sp) end,
-    [Att] = [couch_att:from_disk_term(StreamSrc, T) || T <- Atts1],
-    ReadBin = couch_att:to_binary(Att),
-
+    [Att1] = [couch_att:from_disk_term(StreamSrc, T) || T <- Atts1],
+    ReadBin = couch_att:to_binary(Att1),
     ?assertEqual(AttBin, ReadBin).
 
 
-    
+% N.B. This test may be overly specific for some theoretical
+% storage engines that don't re-initialize their
+% attachments streams when restarting (for instance if
+% we ever have something that stores attachemnts in
+% an external object store)
+cet_inactive_stream() ->
+    {ok, Engine, DbPath, St1} = test_engine_util:init_engine(dbpath),
+
+    AttBin = crypto:rand_bytes(32768),
+
+    [Att0] = test_engine_util:prep_atts(Engine, St1, [
+            {<<"ohai.txt">>, AttBin}
+        ]),
+
+    {stream, Stream} = couch_att:fetch(data, Att0),
+    ?assertEqual(true, Engine:is_active_stream(St1, Stream)),
+
+    Engine:terminate(normal, St1),
+    {ok, St2} = Engine:init(DbPath, []),
+
+    ?assertEqual(false, Engine:is_active_stream(St2, Stream)).
