@@ -18,7 +18,7 @@
 start() ->
     monitor_parent(),
     {EngineApp, EngineMod} = start_apps(),
-    io:format(standard_error, "~nTesting: ~s:~s~n~n", [EngineApp, EngineMod]),
+    io:format(standard_error, "~nTesting: ~s/~s~n~n", [EngineApp, EngineMod]),
     try
         run(EngineApp, EngineMod)
     after
