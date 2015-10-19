@@ -142,8 +142,9 @@ gen_write(Engine, St, {create, {DocId, Body, Atts0}}, UpdateSeq) ->
         sizes = Sizes
     }};
 
-gen_write(Engine, St, {purge, {DocId, PrevRevs, _}}, UpdateSeq) ->
+gen_write(Engine, St, {purge, {DocId, PrevRevs0, _}}, UpdateSeq) ->
     [#full_doc_info{} = PrevFDI] = Engine:open_docs(St, [DocId]),
+    PrevRevs = if is_list(PrevRevs0) -> PrevRevs0; true -> [PrevRevs0] end,
 
     #full_doc_info{
         rev_tree = PrevTree
@@ -176,7 +177,6 @@ gen_write(Engine, St, {purge, {DocId, PrevRevs, _}}, UpdateSeq) ->
             },
             {{PrevFDI, NewFDI}, NewUpdateSeq + 1, {DocId, RemRevs}}
     end;
-    
 
 gen_write(Engine, St, {Action, {DocId, Body, Atts0}}, UpdateSeq) ->
     [#full_doc_info{} = PrevFDI] = Engine:open_docs(St, [DocId]),
