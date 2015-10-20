@@ -123,7 +123,7 @@ gen_write(Engine, St, {create, {DocId, Body, Atts0}}, UpdateSeq) ->
 
     Sizes = #size_info{
         active = Len,
-        external = erlang:external_size({Body, Atts})
+        external = erlang:external_size(Summary)
     },
 
     Leaf = #leaf{
@@ -161,21 +161,21 @@ gen_write(Engine, St, {purge, {DocId, PrevRevs0, _}}, UpdateSeq) ->
     case NewTree of
         [] ->
             % We've completely purged the document
-            {{PrevFDI, not_found}, UpdateSeq + 1, {DocId, RemRevs}};
+            {{PrevFDI, not_found}, UpdateSeq, {DocId, RemRevs}};
         _ ->
             % We have to relabel the update_seq of all
             % leaves. See couch_db_updater for details.
             {NewNewTree, NewUpdateSeq} = couch_key_tree:mapfold(fun
                 (_RevId, Leaf, leaf, InnerSeqAcc) ->
-                    {Leaf#leaf{seq = InnerSeqAcc + 1}, InnerSeqAcc + 1};
+                    {Leaf#leaf{seq = InnerSeqAcc}, InnerSeqAcc + 1};
                 (_RevId, Value, _Type, InnerSeqAcc) ->
                     {Value, InnerSeqAcc}
             end, UpdateSeq, NewTree),
             NewFDI = PrevFDI#full_doc_info{
-                update_seq = NewUpdateSeq,
+                update_seq = NewUpdateSeq - 1,
                 rev_tree = NewNewTree
             },
-            {{PrevFDI, NewFDI}, NewUpdateSeq + 1, {DocId, RemRevs}}
+            {{PrevFDI, NewFDI}, NewUpdateSeq, {DocId, RemRevs}}
     end;
 
 gen_write(Engine, St, {Action, {DocId, Body, Atts0}}, UpdateSeq) ->
@@ -203,7 +203,7 @@ gen_write(Engine, St, {Action, {DocId, Body, Atts0}}, UpdateSeq) ->
 
     Sizes = #size_info{
         active = Len,
-        external = erlang:external_size({Body, Atts})
+        external = erlang:external_size(Summary)
     },
 
     Leaf = #leaf{
@@ -215,9 +215,13 @@ gen_write(Engine, St, {Action, {DocId, Body, Atts0}}, UpdateSeq) ->
     },
 
     {RevPos, PrevRevId} = PrevRev,
-    Tree = gen_tree(Action, RevPos, PrevRevId, Rev, Leaf),
+    Path = gen_path(Action, RevPos, PrevRevId, Rev, Leaf),
     RevsLimit = Engine:get(St, revs_limit),
-    {NewTree, new_leaf} = couch_key_tree:merge(PrevRevTree, Tree, RevsLimit),
+    NodeType = case Action of
+        conflict -> new_branch;
+        _ -> new_leaf
+    end,
+    {NewTree, NodeType} = couch_key_tree:merge(PrevRevTree, Path, RevsLimit),
 
     NewFDI = PrevFDI#full_doc_info{
         deleted = couch_doc:is_deleted(NewTree),
@@ -237,11 +241,11 @@ gen_revision(update, DocId, PrevRev, Body, Atts) ->
     crypto:hash(md5, term_to_binary({DocId, PrevRev, Body, Atts})).
 
 
-gen_tree(conflict, _RevPos, _PrevRevId, Rev, Leaf) ->
-    [{0, {Rev, Leaf, []}}];
-gen_tree(delete, RevPos, PrevRevId, Rev, Leaf) ->
-    gen_tree(update, RevPos, PrevRevId, Rev, Leaf);
-gen_tree(update, RevPos, PrevRevId, Rev, Leaf) ->
+gen_path(conflict, _RevPos, _PrevRevId, Rev, Leaf) ->
+    {0, {Rev, Leaf, []}};
+gen_path(delete, RevPos, PrevRevId, Rev, Leaf) ->
+    gen_path(update, RevPos, PrevRevId, Rev, Leaf);
+gen_path(update, RevPos, PrevRevId, Rev, Leaf) ->
     {RevPos, {PrevRevId, ?REV_MISSING, [{Rev, Leaf, []}]}}.
 
 
@@ -298,10 +302,186 @@ write_att(Stream, FileName, OrigData, Data) ->
     end,
     ok = couch_stream:write(Stream, Chunk),
     write_att(Stream, FileName, OrigData, Rest).
-    
+
 
 prev_rev(#full_doc_info{} = FDI) ->
     #doc_info{
-        revs = [#rev_info{} = PrevRev]
+        revs = [#rev_info{} = PrevRev | _]
     } = couch_doc:to_doc_info(FDI),
     PrevRev.
+
+
+db_as_term(Engine, St) ->
+    [
+        {props, db_props_as_term(Engine, St)},
+        {docs, db_docs_as_term(Engine, St)},
+        {local_docs, db_local_docs_as_term(Engine, St)},
+        {changes, db_changes_as_term(Engine, St)}
+    ].
+
+
+db_props_as_term(Engine, St) ->
+    Props = [
+        doc_count,
+        del_doc_count,
+        disk_version,
+        update_seq,
+        purge_seq,
+        last_purged,
+        security,
+        revs_limit,
+        uuid,
+        epochs
+    ],
+    lists:map(fun(Key) ->
+        {Key, Engine:get(St, Key)}
+    end, Props).
+
+
+db_docs_as_term(Engine, St) ->
+    FoldFun = fun(FDI, Acc) -> {ok, [FDI | Acc]} end,
+    {ok, FDIs} = Engine:fold_docs(St, FoldFun, [], []),
+    lists:reverse(lists:map(fun(FDI) ->
+        fdi_to_term(Engine, St, FDI)
+    end, FDIs)).
+
+
+db_local_docs_as_term(Engine, St) ->
+    FoldFun = fun(Doc, Acc) -> {ok, [Doc | Acc]} end,
+    {ok, LDocs} = Engine:fold_local_docs(St, FoldFun, [], []),
+    lists:reverse(LDocs).
+
+
+db_changes_as_term(Engine, St) ->
+    FoldFun = fun(FDI, Acc) -> {ok, [FDI | Acc]} end,
+    {ok, Changes} = Engine:fold_changes(St, 0, FoldFun, [], []),
+    lists:reverse(lists:map(fun(FDI) ->
+        fdi_to_term(Engine, St, FDI)
+    end, Changes)).
+
+
+fdi_to_term(Engine, St, FDI) ->
+    #full_doc_info{
+        rev_tree = OldTree
+    } = FDI,
+    Acc = {Engine, St},
+    {NewRevTree, _} = couch_key_tree:mapfold(fun tree_to_term/4, Acc, OldTree),
+    FDI#full_doc_info{
+        rev_tree = NewRevTree,
+        % Blank out sizes because we allow storage
+        % engines to handle this with their own
+        % definition until further notice.
+        sizes = #size_info{
+            active = -1,
+            external = -1
+        }
+    }.
+
+
+tree_to_term(_Rev, _Leaf, branch, Acc) ->
+    {?REV_MISSING, Acc};
+
+tree_to_term(_Rev, #leaf{} = Leaf, leaf, {Engine, St}) ->
+    #leaf{
+        ptr = Ptr
+    } = Leaf,
+
+    {ok, {Body0, Atts0}} = Engine:read_doc(St, Ptr),
+
+    Body = if not is_binary(Body0) -> Body0; true ->
+        couch_compress:decompress(Body0)
+    end,
+
+    Atts1 = if not is_binary(Atts0) -> Atts0; true ->
+        couch_compress:decompress(Atts0)
+    end,
+    StreamSrc = fun(Sp) -> Engine:open_read_stream(St, Sp) end,
+    Atts2 = [couch_att:from_disk_term(StreamSrc, Att) || Att <- Atts1],
+    Atts = [att_to_term(Att) || Att <- Atts2],
+
+    NewLeaf = Leaf#leaf{
+        ptr = Body,
+        sizes = #size_info{active = -1, external = -1},
+        atts = Atts
+    },
+    {NewLeaf, {Engine, St}}.
+
+
+att_to_term(Att) ->
+    Bin = couch_att:to_binary(Att),
+    couch_att:store(data, Bin, Att).
+
+
+term_diff(T1, T2) when is_tuple(T1), is_tuple(T2) ->
+    tuple_diff(tuple_to_list(T1), tuple_to_list(T2));
+
+term_diff(L1, L2) when is_list(L1), is_list(L2) ->
+    list_diff(L1, L2);
+
+term_diff(V1, V2) when V1 == V2 ->
+    nodiff;
+
+term_diff(V1, V2) ->
+    {V1, V2}.
+
+
+tuple_diff([], []) ->
+    nodiff;
+
+tuple_diff([T1 | _], []) ->
+    {longer, T1};
+
+tuple_diff([], [T2 | _]) ->
+    {shorter, T2};
+
+tuple_diff([T1 | R1], [T2 | R2]) ->
+    case term_diff(T1, T2) of
+        nodiff ->
+            tuple_diff(R1, R2);
+        Else ->
+            {T1, Else}
+    end.
+
+
+list_diff([], []) ->
+    nodiff;
+
+list_diff([T1 | _], []) ->
+    {longer, T1};
+
+list_diff([], [T2 | _]) ->
+    {shorter, T2};
+
+list_diff([T1 | R1], [T2 | R2]) ->
+    case term_diff(T1, T2) of
+        nodiff ->
+            list_diff(R1, R2);
+        Else ->
+            {T1, Else}
+    end.
+
+
+compact(Engine, St) ->
+    compact(Engine, St, fun() -> ok end).
+
+
+compact(Engine, St1, DbPath) ->
+    DbName = filename:basename(DbPath),
+    {ok, St2, Pid} = Engine:start_compaction(St1, DbName, [], self()),
+    Ref = erlang:monitor(process, Pid),
+
+    % Ideally I'd assert that Pid is linked to us
+    % at this point but its technically possible
+    % that it could have finished compacting by
+    % the time we check... Quite the quandry.
+
+    Term = receive
+        {'$gen_cast', {compact_done, Engine, Term0}} ->
+            Term0;
+        {'DOWN', Ref, _, _, Reason} ->
+            erlang:error({compactor_died, Reason})
+        after 10000 ->
+            erlang:error(compactor_timed_out)
+    end,
+
+    {ok, St2, DbName, Pid, Term}.
