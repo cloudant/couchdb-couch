@@ -351,6 +351,7 @@ from_disk_term(StreamSrc, {Base, Extended})
         when is_tuple(Base), is_list(Extended) ->
     store(Extended, from_disk_term(StreamSrc, Base));
 from_disk_term(StreamSrc, {Name,Type,Sp,AttLen,DiskLen,RevPos,Md5,Enc}) ->
+    {ok, Stream} = open_stream(StreamSrc, Sp),
     #att{
         name=Name,
         type=Type,
@@ -358,10 +359,11 @@ from_disk_term(StreamSrc, {Name,Type,Sp,AttLen,DiskLen,RevPos,Md5,Enc}) ->
         disk_len=DiskLen,
         md5=Md5,
         revpos=RevPos,
-        data={stream, open_stream(StreamSrc, Sp)},
+        data={stream, Stream},
         encoding=upgrade_encoding(Enc)
     };
 from_disk_term(StreamSrc, {Name,Type,Sp,AttLen,RevPos,Md5}) ->
+    {ok, Stream} = open_stream(StreamSrc, Sp),
     #att{
         name=Name,
         type=Type,
@@ -369,9 +371,10 @@ from_disk_term(StreamSrc, {Name,Type,Sp,AttLen,RevPos,Md5}) ->
         disk_len=AttLen,
         md5=Md5,
         revpos=RevPos,
-        data={stream, open_stream(StreamSrc, Sp)}
+        data={stream, Stream}
     };
 from_disk_term(StreamSrc, {Name,{Type,Sp,AttLen}}) ->
+    {ok, Stream} = open_stream(StreamSrc, Sp),
     #att{
         name=Name,
         type=Type,
@@ -379,7 +382,7 @@ from_disk_term(StreamSrc, {Name,{Type,Sp,AttLen}}) ->
         disk_len=AttLen,
         md5= <<>>,
         revpos=0,
-        data={stream,open_stream(StreamSrc, Sp)}
+        data={stream, Stream}
     }.
 
 

@@ -131,7 +131,7 @@
 
 
 -callback open_read_stream(DbHandle::db_handle(), StreamDiskInfo::any()) ->
-        {Module::atom(), ReadStreamState::any()}.
+        {ok, {Module::atom(), ReadStreamState::any()}}.
 
 
 -callback is_active_stream(DbHandle::db_handle(), ReadStreamState::any()) ->
