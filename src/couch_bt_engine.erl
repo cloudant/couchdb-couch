@@ -97,7 +97,7 @@ init(FilePath, Options) ->
     Header = case lists:member(create, Options) of
         true ->
             delete_compaction_files(FilePath),
-            Header0 = couch_db_header:new(),
+            Header0 = couch_bt_engine_header:new(),
             ok = couch_file:write_header(Fd, Header0),
             Header0;
         false ->
@@ -106,7 +106,7 @@ init(FilePath, Options) ->
                     Header0;
                 no_valid_header ->
                     delete_compaction_files(FilePath),
-                    Header0 =  couch_db_header:new(),
+                    Header0 =  couch_bt_engine_header:new(),
                     ok = couch_file:write_header(Fd, Header0),
                     Header0
             end
@@ -208,7 +208,7 @@ get(#st{} = St, security, _) ->
     end;
 
 get(#st{header = Header}, DbProp, Default) ->
-    couch_db_header:get(Header, DbProp, Default).
+    couch_bt_engine_header:get(Header, DbProp, Default).
 
 
 set(#st{} = St, security, NewSecurity) ->
@@ -221,7 +221,7 @@ set(#st{} = St, update_seq, Value) ->
         header = Header
     } = St,
     {ok, St#st{
-        header = couch_db_header:set(Header, [
+        header = couch_bt_engine_header:set(Header, [
             {update_seq, Value}
         ]),
         needs_commit = true
@@ -232,7 +232,7 @@ set(#st{} = St, compacted_seq, Value) ->
         header = Header
     } = St,
     {ok, St#st{
-        header = couch_db_header:set(Header, [
+        header = couch_bt_engine_header:set(Header, [
             {compacted_seq, Value}
         ]),
         needs_commit = true
@@ -242,9 +242,9 @@ set(#st{} = St, DbProp, Value) ->
     #st{
         header = Header
     } = St,
-    UpdateSeq = couch_db_header:get(Header, update_seq),
+    UpdateSeq = couch_bt_engine_header:get(Header, update_seq),
     {ok, St#st{
-        header = couch_db_header:set(Header, [
+        header = couch_bt_engine_header:set(Header, [
             {DbProp, Value},
             {update_seq, UpdateSeq + 1}
         ]),
@@ -336,16 +336,16 @@ write_doc_infos(#st{} = St, Pairs, LocalDocs, PurgedIdRevs) ->
 
     NewHeader = case PurgedIdRevs of
         [] ->
-            couch_db_header:set(St#st.header, [
+            couch_bt_engine_header:set(St#st.header, [
                 {update_seq, NewUpdateSeq}
             ]);
         _ ->
             {ok, Ptr, _} = couch_file:append_term(St#st.fd, PurgedIdRevs),
-            OldPurgeSeq = couch_db_header:get(St#st.header, purge_seq),
+            OldPurgeSeq = couch_bt_engine_header:get(St#st.header, purge_seq),
             % We bump NewUpdateSeq because we have to ensure that
             % indexers see that they need to process the new purge
             % information.
-            couch_db_header:set(St#st.header, [
+            couch_bt_engine_header:set(St#st.header, [
                 {update_seq, NewUpdateSeq + 1},
                 {purge_seq, OldPurgeSeq + 1},
                 {purged_docs, Ptr}
@@ -600,10 +600,10 @@ init_state(FilePath, Fd, Header0, Options) ->
         _ -> ok
     end,
 
-    Header = couch_db_header:upgrade(Header0),
+    Header = couch_bt_engine_header:upgrade(Header0),
     Compression = couch_compress:get_compression_method(),
 
-    IdTreeState = couch_db_header:id_tree_state(Header),
+    IdTreeState = couch_bt_engine_header:id_tree_state(Header),
     {ok, IdTree} = couch_btree:open(IdTreeState, Fd, [
             {split, fun ?MODULE:id_tree_split/1},
             {join, fun ?MODULE:id_tree_join/2},
@@ -611,7 +611,7 @@ init_state(FilePath, Fd, Header0, Options) ->
             {compression, Compression}
         ]),
 
-    SeqTreeState = couch_db_header:seq_tree_state(Header),
+    SeqTreeState = couch_bt_engine_header:seq_tree_state(Header),
     {ok, SeqTree} = couch_btree:open(SeqTreeState, Fd, [
             {split, fun ?MODULE:seq_tree_split/1},
             {join, fun ?MODULE:seq_tree_join/2},
@@ -619,7 +619,7 @@ init_state(FilePath, Fd, Header0, Options) ->
             {compression, Compression}
         ]),
 
-    LocalTreeState = couch_db_header:local_tree_state(Header),
+    LocalTreeState = couch_bt_engine_header:local_tree_state(Header),
     {ok, LocalTree} = couch_btree:open(LocalTreeState, Fd, [
             {split, fun ?MODULE:local_tree_split/1},
             {join, fun ?MODULE:local_tree_join/2},
@@ -656,7 +656,7 @@ init_state(FilePath, Fd, Header0, Options) ->
 
 
 update_header(St, Header) ->
-    couch_db_header:set(Header, [
+    couch_bt_engine_header:set(Header, [
         {seq_tree_state, couch_btree:get_state(St#st.seq_tree)},
         {id_tree_state, couch_btree:get_state(St#st.id_tree)},
         {local_tree_state, couch_btree:get_state(St#st.local_tree)}
@@ -822,7 +822,7 @@ finish_compaction_int(#st{} = OldSt, #st{} = NewSt1) ->
     {ok, NewLocal2} = couch_btree:add(NewLocal1, LocalDocs),
 
     {ok, NewSt2} = commit_data(NewSt1#st{
-        header = couch_db_header:set(Header, [
+        header = couch_bt_engine_header:set(Header, [
             {compacted_seq, ?MODULE:get(OldSt, update_seq)},
             {revs_limit, ?MODULE:get(OldSt, revs_limit)}
         ]),
