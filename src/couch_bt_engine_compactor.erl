@@ -60,7 +60,7 @@ open_compaction_files(SrcHdr, DbFilePath, Options) ->
     MetaFile = DbFilePath ++ ".compact.meta",
     {ok, DataFd, DataHdr} = open_compaction_file(DataFile),
     {ok, MetaFd, MetaHdr} = open_compaction_file(MetaFile),
-    DataHdrIsDbHdr = couch_bt_engine_header:is_header(DataHdr),
+    DataHdrIsDbHdr = couch_db_header:is_header(DataHdr),
     case {DataHdr, MetaHdr} of
         {#comp_header{}=A, #comp_header{}=A} ->
             DbHeader = A#comp_header.db_header,
@@ -69,7 +69,7 @@ open_compaction_files(SrcHdr, DbFilePath, Options) ->
             St1 = bind_emsort(St0, MetaFd, A#comp_header.meta_state),
             {ok, St1, DataFile, DataFd, MetaFd, St0#st.id_tree};
         _ when DataHdrIsDbHdr ->
-            Header = couch_bt_engine_header:from(SrcHdr),
+            Header = couch_db_header:from(SrcHdr),
             ok = reset_compaction_file(MetaFd, Header),
             St0 = couch_bt_engine:init_state(
                     DataFile, DataFd, DataHdr, Options),
@@ -88,13 +88,13 @@ open_compaction_files(SrcHdr, DbFilePath, Options) ->
 copy_purge_info(OldSt, NewSt) ->
     OldHdr = OldSt#st.header,
     NewHdr = NewSt#st.header,
-    OldPurgeSeq = couch_bt_engine_header:purge_seq(OldHdr),
+    OldPurgeSeq = couch_db_header:purge_seq(OldHdr),
     case OldPurgeSeq > 0 of
         true ->
             Purged = couch_bt_engine:get(OldSt, last_purged),
             Opts = [{compression, NewSt#st.compression}],
             {ok, Ptr, _} = couch_file:append_term(NewSt#st.fd, Purged, Opts),
-            NewNewHdr = couch_bt_engine_header:set(NewHdr, [
+            NewNewHdr = couch_db_header:set(NewHdr, [
                 {purge_seq, OldPurgeSeq},
                 {purged_docs, Ptr}
             ]),
@@ -273,21 +273,21 @@ copy_doc_attachments(#st{} = SrcSt, SrcSp, DstSt) ->
     NewBinInfos = lists:map(
         fun({Name, Type, BinSp, AttLen, RevPos, ExpectedMd5}) ->
             % 010 UPGRADE CODE
-            SrcStream = couch_bt_engine:open_read_stream(SrcSt, BinSp),
-            DstStream = couch_bt_engine:open_write_stream(DstSt, []),
+            {ok, SrcStream} = couch_bt_engine:open_read_stream(SrcSt, BinSp),
+            {ok, DstStream} = couch_bt_engine:open_write_stream(DstSt, []),
             ok = couch_stream:copy(SrcStream, DstStream),
             {NewStream, AttLen, AttLen, ActualMd5, _IdentityMd5} =
                 couch_stream:close(DstStream),
-            NewBinSp = couch_stream:to_disk_term(NewStream),
+            {ok, NewBinSp} = couch_stream:to_disk_term(NewStream),
             couch_util:check_md5(ExpectedMd5, ActualMd5),
             {Name, Type, NewBinSp, AttLen, AttLen, RevPos, ExpectedMd5, identity};
         ({Name, Type, BinSp, AttLen, DiskLen, RevPos, ExpectedMd5, Enc1}) ->
-            SrcStream = couch_bt_engine:open_read_stream(SrcSt, BinSp),
-            DstStream = couch_bt_engine:open_write_stream(DstSt, []),
+            {ok, SrcStream} = couch_bt_engine:open_read_stream(SrcSt, BinSp),
+            {ok, DstStream} = couch_bt_engine:open_write_stream(DstSt, []),
             ok = couch_stream:copy(SrcStream, DstStream),
             {NewStream, AttLen, _, ActualMd5, _IdentityMd5} =
                 couch_stream:close(DstStream),
-            NewBinSp = couch_stream:to_disk_term(NewStream),
+            {ok, NewBinSp} = couch_stream:to_disk_term(NewStream),
             couch_util:check_md5(ExpectedMd5, ActualMd5),
             Enc = case Enc1 of
             true ->
@@ -315,7 +315,7 @@ copy_meta_data(#st{} = St) ->
         header = Header,
         id_tree = Src
     } = St,
-    DstState = couch_bt_engine_header:id_tree_state(Header),
+    DstState = couch_db_header:id_tree_state(Header),
     {ok, IdTree0} = couch_btree:open(DstState, Fd, [
         {split, fun couch_bt_engine:id_tree_split/1},
         {join, fun couch_bt_engine:id_tree_join/2},
@@ -363,7 +363,7 @@ commit_compaction_data(#st{}=St) ->
 
 
 commit_compaction_data(#st{header = OldHeader} = St0, Fd) ->
-    DataState = couch_bt_engine_header:id_tree_state(OldHeader),
+    DataState = couch_db_header:id_tree_state(OldHeader),
     MetaFd = couch_emsort:get_fd(St0#st.id_tree),
     MetaState = couch_emsort:get_state(St0#st.id_tree),
     St1 = bind_id_tree(St0, St0#st.fd, DataState),
