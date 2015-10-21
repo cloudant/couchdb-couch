@@ -461,10 +461,6 @@ list_diff([T1 | R1], [T2 | R2]) ->
     end.
 
 
-compact(Engine, St) ->
-    compact(Engine, St, fun() -> ok end).
-
-
 compact(Engine, St1, DbPath) ->
     DbName = filename:basename(DbPath),
     {ok, St2, Pid} = Engine:start_compaction(St1, DbName, [], self()),
@@ -485,3 +481,29 @@ compact(Engine, St1, DbPath) ->
     end,
 
     {ok, St2, DbName, Pid, Term}.
+
+
+with_config(Config, Fun) ->
+    OldConfig = apply_config(Config),
+    try
+        Fun()
+    after
+        apply_config(OldConfig)
+    end.
+
+
+apply_config([]) ->
+    [];
+
+apply_config([{Section, Key, Value} | Rest]) ->
+    Orig = config:get(Section, Key),
+    case Value of
+        undefined -> config:delete(Section, Key);
+        _ -> config:set(Section, Key, Value)
+    end,
+    [{Section, Key, Orig} | apply_config(Rest)].
+
+
+
+
+

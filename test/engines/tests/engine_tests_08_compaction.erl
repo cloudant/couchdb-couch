@@ -115,15 +115,59 @@ cet_compact_with_everything() ->
     {ok, St9} = Engine:commit_data(St8),
 
     Db1 = test_engine_util:db_as_term(Engine, St9),
-    {ok, St10, DbName, _, Term} = test_engine_util:compact(Engine, St9, Path),
+
+    Config = [
+        {"database_compaction", "doc_buffer_size", "1024"},
+        {"database_compaction", "checkpoint_after", "2048"}
+    ],
+
+    {ok, St10, DbName, _, Term} = test_engine_util:with_config(Config, fun() ->
+        test_engine_util:compact(Engine, St9, Path)
+    end),
+
     {ok, St11, undefined} = Engine:finish_compaction(St10, DbName, [], Term),
     Db2 = test_engine_util:db_as_term(Engine, St11),
     Diff = test_engine_util:term_diff(Db1, Db2),
     ?assertEqual(nodiff, Diff).
 
 
-% compact resume works
-% compact resume
+cet_recompact_updates() ->
+    {ok, Engine, Path, St1} = test_engine_util:init_engine(dbpath),
+
+    Actions1 = [
+        {create, {<<"foo">>, []}},
+        {create, {<<"bar">>, []}}
+    ],
+
+    {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions1),
+    {ok, St3, DbName, _, Term} = test_engine_util:compact(Engine, St2, Path),
+
+    Actions2 = [
+        {update, {<<"foo">>, [{<<"updated">>, true}]}},
+        {create, {<<"baz">>, []}}
+    ],
+
+    {ok, St4} = test_engine_util:apply_actions(Engine, St3, Actions2),
+    Db1 = test_engine_util:db_as_term(Engine, St4),
+
+    {ok, St5, NewPid} = Engine:finish_compaction(St4, DbName, [], Term),
+
+    ?assertEqual(true, is_pid(NewPid)),
+    Ref = erlang:monitor(process, NewPid),
+
+    NewTerm = receive
+        {'$gen_cast', {compact_done, Engine, Term0}} ->
+            Term0;
+        {'DOWN', Ref, _, _, Reason} ->
+            erlang:error({compactor_died, Reason})
+        after 10000 ->
+            erlang:error(compactor_timed_out)
+    end,
+
+    {ok, St6, undefined} = Engine:finish_compaction(St5, DbName, [], NewTerm),
+    Db2 = test_engine_util:db_as_term(Engine, St6),
+    Diff = test_engine_util:term_diff(Db1, Db2),
+    ?assertEqual(nodiff, Diff).
 
 
 docid(I) ->
