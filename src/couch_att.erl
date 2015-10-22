@@ -239,8 +239,7 @@ copy(Att, DstStream) ->
     ok = couch_stream:copy(SrcStream, DstStream),
     {NewStream, AttLen, _, NewMd5, _} = couch_stream:close(DstStream),
     couch_util:check_md5(OldMd5, NewMd5),
-    NewBinSp = couch_stream:to_disk_term(NewStream),
-    store(data, NewBinSp, Att).
+    store(data, {stream, NewStream}, Att).
 
 
 is_stub(Att) ->
