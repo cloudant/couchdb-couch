@@ -10,13 +10,22 @@ gather(Module) ->
     Tests = lists:foldl(fun({Fun, Arity}, Acc) ->
         case {atom_to_list(Fun), Arity} of
             {[$c, $e, $t, $_ | _], 0} ->
-                [{spawn, fun Module:Fun/Arity} | Acc];
+                TestFun = make_test_fun(Module, Fun),
+                [{spawn, TestFun} | Acc];
             _ ->
                 Acc
         end
     end, [], Exports),
     lists:reverse(Tests).
 
+
+make_test_fun(Module, Fun) ->
+    Name = lists:flatten(io_lib:format("~s:~s", [Module, Fun])),
+    Wrapper = fun() ->
+        process_flag(trap_exit, true),
+        Module:Fun()
+    end,
+    {Name, Wrapper}.
 
 rootdir() ->
     config:get("couchdb", "database_dir", ".").

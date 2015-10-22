@@ -19,6 +19,7 @@ cet_open_non_existent() ->
 
 
 cet_open_create() ->
+    process_flag(trap_exit, true),
     Engine = test_engine_util:get_engine(),
     DbPath = test_engine_util:dbpath(),
 
