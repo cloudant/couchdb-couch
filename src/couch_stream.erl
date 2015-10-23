@@ -99,9 +99,9 @@ foldl({Engine, EngineState}, Fun, Acc) ->
 foldl(Engine, <<>>, Fun, Acc) ->
     foldl(Engine, Fun, Acc);
 foldl(Engine, Md5, UserFun, UserAcc) ->
-    InitAcc = {couch_util:md5_init(), UserFun, UserAcc},
+    InitAcc = {couch_crypto:hash_init(md5), UserFun, UserAcc},
     {Md5Acc, _, OutAcc} = foldl(Engine, fun foldl_md5/2, InitAcc),
-    Md5 = couch_util:md5_final(Md5Acc),
+    Md5 = couch_crypto:hash_final(md5, Md5Acc),
     OutAcc.
 
 
@@ -129,7 +129,7 @@ range_foldl(Engine, From, To, UserFun, UserAcc) when To >= From ->
 
 
 foldl_md5(Bin, {Md5Acc, UserFun, UserAcc}) ->
-    NewMd5Acc = couch_util:md5_update(Md5Acc, Bin),
+    NewMd5Acc = couch_crypto:hash_update(md5, Md5Acc, Bin),
     {NewMd5Acc, UserFun, UserFun(Bin, UserAcc)}.
 
 
