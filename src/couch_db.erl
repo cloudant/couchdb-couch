@@ -31,9 +31,9 @@
 -export([fold_docs/3, fold_docs/4]).
 -export([fold_changes/4, fold_changes/5, count_changes_since/2]).
 -export([set_security/2,get_security/1]).
--export([changes_since/4,changes_since/5,read_doc/2,new_revid/1]).
+-export([read_doc/2,new_revid/1]).
 -export([check_is_admin/1, is_admin/1, check_is_member/1, get_doc_count/1]).
--export([reopen/1, is_system_db/1, compression/1, make_doc/5]).
+-export([reopen/1, is_system_db/1, make_doc/5]).
 -export([load_validation_funs/1, reload_validation_funs/1]).
 -export([with_stream/3]).
 -export([monitored_by/1]).

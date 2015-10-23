@@ -331,8 +331,6 @@ open_async(Server, From, DbName, {Module, Filepath}, Options) ->
         true -> create;
         false -> open
     end,
-    % icky hack of field values - compactor_pid used to store clients
-    % and fd used for opening request info
     true = ets:insert(couch_dbs, #srv_entry{
         name = DbName,
         pid = Opener,
@@ -459,7 +457,6 @@ handle_call({create, DbName, Options}, From, Server) ->
             % We're trying to create a database while someone is in
             % the middle of trying to open it. We allow one creator
             % to wait while we figure out if it'll succeed.
-            % icky hack of field values - fd used to store create request
             CrOptions = [create | Options],
             ReqType = {create, DbName, Engine, CrOptions, From},
             true = ets:insert(couch_dbs, Entry#srv_entry{req_type = ReqType}),

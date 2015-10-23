@@ -192,7 +192,7 @@ identity_enc_dec_funs() ->
     }.
 
 
-init({Fd, OpenerPid, OpenerPriority, Options}) ->
+init({Engine, OpenerPid, OpenerPriority, Options}) ->
     erlang:put(io_priority, OpenerPriority),
     {EncodingFun, EndEncodingFun} =
     case couch_util:get_value(encoding, Options, identity) of
@@ -200,7 +200,7 @@ init({Fd, OpenerPid, OpenerPriority, Options}) ->
         gzip -> gzip_init(Options)
     end,
     {ok, #stream{
-            fd=Fd,
+            engine=Engine,
             opener_monitor=erlang:monitor(process, OpenerPid),
             md5=couch_crypto:hash_init(md5),
             identity_md5=couch_crypto:hash_init(md5),
@@ -239,8 +239,7 @@ handle_call({write, Bin}, _From, Stream) ->
         WriteBin2 ->
             NewEngine = do_write(Engine, WriteBin2),
             WrittenLen2 = WrittenLen + iolist_size(WriteBin2),
-            Md5_2 = couch_crypto:hash_update(md5, Md5, WriteBin2),
-            Written2 = [{Pos, iolist_size(WriteBin2)}|Written]
+            Md5_2 = couch_crypto:hash_update(md5, Md5, WriteBin2)
         end,
 
         {reply, ok, Stream#stream{
