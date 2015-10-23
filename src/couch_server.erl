@@ -488,10 +488,10 @@ handle_call({delete, DbName, Options}, _From, Server) ->
         couch_db_plugin:on_delete(DbName, Options),
 
         {Engine, FilePath} = get_engine(Server, DbNameList),
+        RootDir = Server#server.root_dir,
         Async = not lists:member(sync, Options),
         delete_compaction_files(RootDir, FilePath),
 
-        RootDir = Server#server.root_dir,
         case couch_db_engine:delete(Engine, RootDir, FilePath, Async) of
         ok ->
             couch_event:notify(DbName, deleted),
