@@ -33,6 +33,7 @@
 
 -include_lib("couch/include/couch_eunit.hrl").
 -include_lib("couch/include/couch_db.hrl").
+-include_lib("couch/src/couch_db_int.hrl").
 
 -record(ctx, {pid, handle}).
 
