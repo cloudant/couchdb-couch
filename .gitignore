@@ -5,9 +5,13 @@ ebin/
 
 .DS_Store
 
+
+priv/couch_ejson_compare/couch_ejson_compare.d
 priv/couch_js/config.h
+priv/couch_js/http.d
 priv/couchjs
 priv/couchspawnkillable
+priv/icu_driver/couch_icu_driver.d
 priv/*.exp
 priv/*.lib
 vc120.pdb
