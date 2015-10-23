@@ -36,8 +36,12 @@ dbpath() ->
 
 
 get_engine() ->
-    {ok, {_, Engine}} = application:get_env(couch, test_engine),
-    Engine.
+    case application:get_env(couch, test_engine) of
+        {ok, {_, Engine}} ->
+            Engine;
+        _ ->
+            couch_bt_engine
+    end.
 
 
 init_engine() ->
