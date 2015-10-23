@@ -43,6 +43,7 @@
 
 -export([is_db/1, is_clustered_db/1]).
 -export([open_write_stream/2, open_read_stream/2, is_active_stream/2]).
+-export([get_before_doc_update/1, get_after_doc_read/1]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_db_int.hrl").
@@ -360,6 +361,12 @@ get_compacted_seq(#db{}=Db) ->
 
 get_instance_start_time(#db{}=Db) ->
     Db#db.instance_start_time.
+
+get_before_doc_update(#db{} = Db) ->
+    Db#db.before_doc_update.
+
+get_after_doc_read(#db{} = Db) ->
+    Db#db.after_doc_read.
 
 get_db_info(Db) ->
     #db{
