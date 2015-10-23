@@ -284,7 +284,8 @@ make_doc_summary(#st{} = St, {Body0, Atts0}) ->
         false -> couch_compress:compress(Atts0, Comp)
     end,
     SummaryBin = ?term_to_bin({Body, Atts}),
-    couch_file:assemble_file_chunk(SummaryBin, couch_util:md5(SummaryBin)).
+    Md5 = couch_crypto:hash(md5, SummaryBin),
+    couch_file:assemble_file_chunk(SummaryBin, Md5).
 
 
 write_doc_summary(St, SummaryBinary) ->
