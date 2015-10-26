@@ -74,8 +74,11 @@ handle_call(cancel_compact, _From, #db{compactor_pid = Pid} = Db) ->
 
 handle_call({set_security, NewSec}, _From, #db{} = Db) ->
     {ok, NewDb} = couch_db_engine:set(Db, security, NewSec),
-    ok = gen_server:call(couch_server, {db_updated, NewDb}, infinity),
-    {reply, ok, NewDb};
+    NewSecDb = NewDb#db{
+        security = couch_db_engine:get(NewDb, security)
+    },
+    ok = gen_server:call(couch_server, {db_updated, NewSecDb}, infinity),
+    {reply, ok, NewSecDb};
 
 handle_call({set_revs_limit, Limit}, _From, Db) ->
     {ok, Db2} = couch_db_engine:set(Db, revs_limit, Limit),
