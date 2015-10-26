@@ -636,7 +636,7 @@ update_local_doc_revs(Docs) ->
             true  ->
                 <<"0">>
         end,
-        send_result(Client, NewDoc, {ok, NewRev}),
+        send_result(Client, NewDoc, {ok, {0, NewRev}}),
         NewDoc#doc{
             revs = {0, [NewRev]}
         }
