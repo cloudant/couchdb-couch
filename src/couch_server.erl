@@ -272,11 +272,15 @@ all_databases() ->
 all_databases(Fun, Acc0) ->
     {ok, #server{root_dir=Root}} = gen_server:call(couch_server, get_server),
     NormRoot = couch_util:normpath(Root),
-    FinalAcc = try
-    filelib:fold_files(Root,
+    Extensions = get_engine_extensions(),
+    ExtRegExp = "(" ++ string:join(Extensions, "|") ++ ")",
+    RegExp =
         "^[a-z0-9\\_\\$()\\+\\-]*" % stock CouchDB name regex
         "(\\.[0-9]{10,})?"         % optional shard timestamp
-        "\\.couch$",               % filename extension
+        "\\." ++ ExtRegExp ++ "$", % filename extension
+    FinalAcc = try
+    couch_util:fold_files(Root,
+        RegExp,
         true,
             fun(Filename, AccIn) ->
                 NormFilename = couch_util:normpath(Filename),
@@ -284,7 +288,8 @@ all_databases(Fun, Acc0) ->
                 [$/ | RelativeFilename] -> ok;
                 RelativeFilename -> ok
                 end,
-                case Fun(?l2b(filename:rootname(RelativeFilename, ".couch")), AccIn) of
+                Ext = filename:extension(RelativeFilename),
+                case Fun(?l2b(filename:rootname(RelativeFilename, Ext)), AccIn) of
                 {ok, NewAcc} -> NewAcc;
                 {stop, NewAcc} -> throw({stop, Fun, NewAcc})
                 end
@@ -645,3 +650,12 @@ get_default_engine(Server, DbName) ->
 
 make_filepath(RootDir, DbName, Extension) ->
     filename:join([RootDir, "./" ++ DbName ++ "." ++ Extension]).
+
+
+get_engine_extensions() ->
+    case config:get("couchdb_engines") of
+        [] ->
+            ["couch"];
+        Entries ->
+            [Ext || {Ext, _Mod} <- Entries]
+    end.
