@@ -55,7 +55,7 @@ cet_write_one_doc() ->
     } = test_engine_util:prev_rev(FDI),
     {ok, {Body0, _Atts}} = Engine:read_doc(St4, DocPtr),
     Body1 = if not is_binary(Body0) -> Body0; true ->
-        binary_to_term(Body0)
+        couch_compress:decompress(Body0)
     end,
     ?assertEqual([{<<"vsn">>, 1}], Body1).
 
@@ -137,7 +137,7 @@ cet_update_doc() ->
     } = test_engine_util:prev_rev(FDI),
     {ok, {Body0, _Atts}} = Engine:read_doc(St4, DocPtr),
     Body1 = if not is_binary(Body0) -> Body0; true ->
-        binary_to_term(Body0)
+        couch_compress:decompress(Body0)
     end,
     ?assertEqual([{<<"vsn">>, 2}], Body1).
 
@@ -168,7 +168,7 @@ cet_delete_doc() ->
     } = test_engine_util:prev_rev(FDI),
     {ok, {Body0, _Atts}} = Engine:read_doc(St4, DocPtr),
     Body1 = if not is_binary(Body0) -> Body0; true ->
-        binary_to_term(Body0)
+        couch_compress:decompress(Body0)
     end,
     ?assertEqual([], Body1).
 
