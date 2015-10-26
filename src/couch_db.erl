@@ -277,7 +277,8 @@ get_missing_revs(Db, IdRevsList) ->
 
 find_missing([], []) ->
     [];
-find_missing([{Id, Revs}|RestIdRevs], [{ok, FullInfo} | RestLookupInfo]) ->
+find_missing([{Id, Revs}|RestIdRevs], [FullInfo | RestLookupInfo])
+        when is_record(FullInfo, full_doc_info) ->
     case couch_key_tree:find_missing(FullInfo#full_doc_info.rev_tree, Revs) of
     [] ->
         find_missing(RestIdRevs, RestLookupInfo);
