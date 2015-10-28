@@ -26,7 +26,7 @@ init({Engine, DbName, FilePath, Options}) ->
     erlang:put(io_priority, {db_update, DbName}),
     try
         {ok, EngineState} = couch_db_engine:init(Engine, FilePath, Options),
-        Db = init_db(DbName, EngineState, Options),
+        Db = init_db(DbName, FilePath, EngineState, Options),
         maybe_track_db(Db),
         % we don't load validation funs here because the fabric query is liable to
         % race conditions.  Instead see couch_db:validate_doc_update, which loads
@@ -309,7 +309,7 @@ collect_updates(GroupedDocsAcc, ClientsAcc, MergeConflicts, FullCommit) ->
     end.
 
 
-init_db(DbName, EngineState, Options) ->
+init_db(DbName, FilePath, EngineState, Options) ->
     % convert start time tuple to microsecs and store as a binary string
     {MegaSecs, Secs, MicroSecs} = os:timestamp(),
     StartTime = ?l2b(io_lib:format("~p",
@@ -325,6 +325,7 @@ init_db(DbName, EngineState, Options) ->
 
     InitDb = #db{
         name = DbName,
+        filepath = FilePath,
         engine = EngineState,
         instance_start_time = StartTime,
         options = CleanedOptions,

@@ -13,6 +13,7 @@
 -module(couch_db).
 
 -export([open/2,open_int/2,close/1,create/2,get_db_info/1,get_design_docs/1]).
+-export([get_path/1]).
 -export([shutdown/1]).
 -export([incref/1]).
 -export([start_compact/1, start_compact/2, cancel_compact/1]).
@@ -131,6 +132,9 @@ compactor_pid(#db{} = Db) ->
 
 is_system_db(#db{options = Options}) ->
     lists:member(sys_db, Options).
+
+get_path(#db{filepath = Path}) ->
+    Path.
 
 ensure_full_commit(#db{main_pid=Pid, instance_start_time=StartTime}) ->
     ok = gen_server:call(Pid, full_commit, infinity),
