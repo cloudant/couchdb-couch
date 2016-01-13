@@ -136,17 +136,26 @@ gen_write(Engine, St, {create, {DocId, Body, Atts0}}, UpdateSeq) ->
     Atts = [couch_att:to_disk_term(Att) || Att <- Atts0],
 
     Rev = crypto:hash(md5, term_to_binary({DocId, Body, Atts})),
-    Summary = make_doc_summary(Engine, St, {Body, Atts}),
-    {ok, Ptr, Len} = Engine:write_doc_summary(St, Summary),
+
+    Doc0 = #doc{
+        id = DocId,
+        revs = {0, [Rev]},
+        deleted = false,
+        body = Body,
+        atts = Atts
+    },
+
+    Doc1 = make_doc_summary(Engine, St, Doc0),
+    {ok, Doc2, Len} = Engine:write_doc_body(St, Doc1),
 
     Sizes = #size_info{
         active = Len,
-        external = erlang:external_size(Summary)
+        external = erlang:external_size(Doc1#doc.body)
     },
 
     Leaf = #leaf{
         deleted = false,
-        ptr = Ptr,
+        ptr = Doc2#doc.body,
         seq = UpdateSeq,
         sizes = Sizes,
         atts = Atts
@@ -209,9 +218,20 @@ gen_write(Engine, St, {Action, {DocId, Body, Atts0}}, UpdateSeq) ->
         rev = PrevRev
     } = prev_rev(PrevFDI),
 
+    {RevPos, PrevRevId} = PrevRev,
+
     Rev = gen_revision(Action, DocId, PrevRev, Body, Atts),
-    Summary = make_doc_summary(Engine, St, {Body, Atts}),
-    {ok, Ptr, Len} = Engine:write_doc_summary(St, Summary),
+
+    Doc0 = #doc{
+        id = DocId,
+        revs = {RevPos + 1, [Rev, PrevRevId]},
+        deleted = false,
+        body = Body,
+        atts = Atts
+    },
+
+    Doc1 = make_doc_summary(Engine, St, Doc0),
+    {ok, Doc2, Len} = Engine:write_doc_body(St, Doc1),
 
     Deleted = case Action of
         update -> false;
@@ -221,18 +241,17 @@ gen_write(Engine, St, {Action, {DocId, Body, Atts0}}, UpdateSeq) ->
 
     Sizes = #size_info{
         active = Len,
-        external = erlang:external_size(Summary)
+        external = erlang:external_size(Doc1#doc.body)
     },
 
     Leaf = #leaf{
         deleted = Deleted,
-        ptr = Ptr,
+        ptr = Doc2#doc.body,
         seq = UpdateSeq,
         sizes = Sizes,
         atts = Atts
     },
 
-    {RevPos, PrevRevId} = PrevRev,
     Path = gen_path(Action, RevPos, PrevRevId, Rev, Leaf),
     RevsLimit = Engine:get(St, revs_limit),
     NodeType = case Action of
@@ -269,11 +288,13 @@ gen_path(update, RevPos, PrevRevId, Rev, Leaf) ->
 
 make_doc_summary(Engine, St, DocData) ->
     {_, Ref} = spawn_monitor(fun() ->
-        exit({result, Engine:make_doc_summary(St, DocData)})
+        exit({result, Engine:serialize_doc(St, DocData)})
     end),
     receive
         {'DOWN', Ref, _, _, {result, Summary}} ->
-            Summary
+            Summary;
+        {'DOWN', Ref, _, _, Error} ->
+            erlang:error({make_doc_summary_error, Error})
     after 1000 ->
         erlang:error(make_doc_summary_timeout)
     end.
@@ -380,10 +401,12 @@ db_changes_as_term(Engine, St) ->
 
 fdi_to_term(Engine, St, FDI) ->
     #full_doc_info{
+        id = DocId,
         rev_tree = OldTree
     } = FDI,
-    Acc = {Engine, St},
-    {NewRevTree, _} = couch_key_tree:mapfold(fun tree_to_term/4, Acc, OldTree),
+    {NewRevTree, _} = couch_key_tree:mapfold(fun(Rev, Node, Type, Acc) ->
+        tree_to_term(Rev, Node, Type, Acc, DocId)
+    end, {Engine, St}, OldTree),
     FDI#full_doc_info{
         rev_tree = NewRevTree,
         % Blank out sizes because we allow storage
@@ -396,23 +419,32 @@ fdi_to_term(Engine, St, FDI) ->
     }.
 
 
-tree_to_term(_Rev, _Leaf, branch, Acc) ->
+tree_to_term(_Rev, _Leaf, branch, Acc, _DocId) ->
     {?REV_MISSING, Acc};
 
-tree_to_term(_Rev, #leaf{} = Leaf, leaf, {Engine, St}) ->
+tree_to_term({Pos, RevId}, #leaf{} = Leaf, leaf, {Engine, St}, DocId) ->
     #leaf{
+        deleted = Deleted,
         ptr = Ptr
     } = Leaf,
 
-    {ok, {Body0, Atts0}} = Engine:read_doc(St, Ptr),
+    Doc0 = #doc{
+        id = DocId,
+        revs = {Pos, [RevId]},
+        deleted = Deleted,
+        body = Ptr
+    },
 
-    Body = if not is_binary(Body0) -> Body0; true ->
-        couch_compress:decompress(Body0)
+    Doc1 = Engine:read_doc_body(St, Doc0),
+
+    Body = if not is_binary(Doc1#doc.body) -> Doc1#doc.body; true ->
+        couch_compress:decompress(Doc1#doc.body)
     end,
 
-    Atts1 = if not is_binary(Atts0) -> Atts0; true ->
-        couch_compress:decompress(Atts0)
+    Atts1 = if not is_binary(Doc1#doc.atts) -> Doc1#doc.atts; true ->
+        couch_compress:decompress(Doc1#doc.atts)
     end,
+
     StreamSrc = fun(Sp) -> Engine:open_read_stream(St, Sp) end,
     Atts2 = [couch_att:from_disk_term(StreamSrc, Att) || Att <- Atts1],
     Atts = [att_to_term(Att) || Att <- Atts2],

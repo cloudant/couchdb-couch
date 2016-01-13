@@ -51,11 +51,21 @@ cet_write_one_doc() ->
 
     [FDI] = Engine:open_docs(St4, [<<"foo">>]),
     #rev_info{
+        rev = {RevPos, PrevRevId},
+        deleted = Deleted,
         body_sp = DocPtr
     } = test_engine_util:prev_rev(FDI),
-    {ok, {Body0, _Atts}} = Engine:read_doc(St4, DocPtr),
-    Body1 = if not is_binary(Body0) -> Body0; true ->
-        couch_compress:decompress(Body0)
+
+    Doc0 = #doc{
+        id = <<"foo">>,
+        revs = {RevPos, [PrevRevId]},
+        deleted = Deleted,
+        body = DocPtr
+    },
+
+    Doc1 = Engine:read_doc_body(St4, Doc0),
+    Body1 = if not is_binary(Doc1#doc.body) -> Doc1#doc.body; true ->
+        couch_compress:decompress(Doc1#doc.body)
     end,
     ?assertEqual([{<<"vsn">>, 1}], Body1).
 
@@ -132,13 +142,25 @@ cet_update_doc() ->
     ?assertEqual(2, Engine:get(St4, update_seq)),
 
     [FDI] = Engine:open_docs(St4, [<<"foo">>]),
+
     #rev_info{
+        rev = {RevPos, PrevRevId},
+        deleted = Deleted,
         body_sp = DocPtr
     } = test_engine_util:prev_rev(FDI),
-    {ok, {Body0, _Atts}} = Engine:read_doc(St4, DocPtr),
-    Body1 = if not is_binary(Body0) -> Body0; true ->
-        couch_compress:decompress(Body0)
+
+    Doc0 = #doc{
+        id = <<"foo">>,
+        revs = {RevPos, [PrevRevId]},
+        deleted = Deleted,
+        body = DocPtr
+    },
+
+    Doc1 = Engine:read_doc_body(St4, Doc0),
+    Body1 = if not is_binary(Doc1#doc.body) -> Doc1#doc.body; true ->
+        couch_compress:decompress(Doc1#doc.body)
     end,
+
     ?assertEqual([{<<"vsn">>, 2}], Body1).
 
 
@@ -163,13 +185,25 @@ cet_delete_doc() ->
     ?assertEqual(2, Engine:get(St4, update_seq)),
 
     [FDI] = Engine:open_docs(St4, [<<"foo">>]),
+
     #rev_info{
+        rev = {RevPos, PrevRevId},
+        deleted = Deleted,
         body_sp = DocPtr
     } = test_engine_util:prev_rev(FDI),
-    {ok, {Body0, _Atts}} = Engine:read_doc(St4, DocPtr),
-    Body1 = if not is_binary(Body0) -> Body0; true ->
-        couch_compress:decompress(Body0)
+
+    Doc0 = #doc{
+        id = <<"foo">>,
+        revs = {RevPos, [PrevRevId]},
+        deleted = Deleted,
+        body = DocPtr
+    },
+
+    Doc1 = Engine:read_doc_body(St4, Doc0),
+    Body1 = if not is_binary(Doc1#doc.body) -> Doc1#doc.body; true ->
+        couch_compress:decompress(Doc1#doc.body)
     end,
+
     ?assertEqual([], Body1).
 
 

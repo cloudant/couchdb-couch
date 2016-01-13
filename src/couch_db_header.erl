@@ -18,7 +18,10 @@
     from/1,
     is_header/1,
     upgrade/1,
-    set/2
+    get/2,
+    get/3,
+    set/2,
+    set/3
 ]).
 
 -export([
@@ -105,6 +108,18 @@ upgrade(Header) ->
     end, Header, Funs).
 
 
+get(Header, Key) ->
+    ?MODULE:get(Header, Key, undefined).
+
+
+get(Header, Key, Default) ->
+    get_field(Header, Key, Default).
+
+
+set(Header, Key, Value) ->
+    ?MODULE:set(Header, [{Key, Value}]).
+
+
 set(Header0, Fields) ->
     % A subtlety here is that if a database was open during
     % the release upgrade that updates to uuids and epochs then
@@ -164,9 +179,13 @@ compacted_seq(Header) ->
 
 
 get_field(Header, Field) ->
+    get_field(Header, Field, undefined).
+
+
+get_field(Header, Field, Default) ->
     Idx = index(Field),
     case Idx > tuple_size(Header) of
-        true -> undefined;
+        true -> Default;
         false -> element(index(Field), Header)
     end.
 

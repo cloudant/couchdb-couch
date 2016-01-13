@@ -195,18 +195,24 @@ copy_docs(St, #st{} = NewSt, MixedInfos, Retry) ->
 
     NewInfos1 = lists:map(fun(Info) ->
         {NewRevTree, FinalAcc} = couch_key_tree:mapfold(fun
-            (_Rev, #leaf{ptr=Sp}=Leaf, leaf, SizesAcc) ->
+            ({RevPos, RevId}, #leaf{ptr=Sp}=Leaf, leaf, SizesAcc) ->
                 {Body, AttInfos} = copy_doc_attachments(St, Sp, NewSt),
-                SummaryChunk = couch_bt_engine:make_doc_summary(
-                        NewSt, {Body, AttInfos}),
-                ExternalSize = ?term_size(SummaryChunk),
-                {ok, Pos, SummarySize} = couch_file:append_raw_chunk(
-                    NewSt#st.fd, SummaryChunk),
+                Doc0 = #doc{
+                    id = Info#full_doc_info.id,
+                    revs = {RevPos, [RevId]},
+                    deleted = Leaf#leaf.deleted,
+                    body = Body,
+                    atts = AttInfos
+                },
+                Doc1 = couch_bt_engine:serialize_doc(NewSt, Doc0),
+                ExternalSize = ?term_size(Doc1#doc.body),
+                {ok, Doc2, ActiveSize} =
+                        couch_bt_engine:write_doc_body(NewSt, Doc1),
                 AttSizes = [{element(3,A), element(4,A)} || A <- AttInfos],
                 NewLeaf = Leaf#leaf{
-                    ptr = Pos,
+                    ptr = Doc2#doc.body,
                     sizes = #size_info{
-                        active = SummarySize,
+                        active = ActiveSize,
                         external = ExternalSize
                     },
                     atts = AttSizes
@@ -261,7 +267,7 @@ copy_docs(St, #st{} = NewSt, MixedInfos, Retry) ->
 
 
 copy_doc_attachments(#st{} = SrcSt, SrcSp, DstSt) ->
-    {ok, {BodyData, BinInfos0}} = couch_bt_engine:read_doc(SrcSt, SrcSp),
+    {ok, {BodyData, BinInfos0}} = couch_file:pread_term(SrcSt#st.fd, SrcSp),
     BinInfos = case BinInfos0 of
     _ when is_binary(BinInfos0) ->
         couch_compress:decompress(BinInfos0);

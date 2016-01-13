@@ -100,16 +100,16 @@
         [#doc{} | not_found].
 
 
--callback read_doc(DbHandle::db_handle(), DocPtr::any()) ->
-        {ok, DocParts::any()}.
+-callback read_doc_body(DbHandle::db_handle(), RawDoc::doc()) ->
+        {ok, Doc::doc()}.
 
 
--callback make_doc_summary(DbHandle::db_handle(), DocParts::any()) ->
-        any().
+-callback serialize_doc(DbHandle::db_handle(), Doc::doc()) ->
+        doc().
 
 
--callback write_doc_summary(DbHandle::db_handle(), DocSummary::any()) ->
-        {ok, DocPtr::any(), SummarySize::non_neg_integer()}.
+-callback write_doc_body(DbHandle::db_handle(), Doc::doc()) ->
+        {ok, FlushedDoc::doc(), BytesWritten::non_neg_integer()}.
 
 
 -callback write_doc_infos(
@@ -208,10 +208,10 @@
 
     open_docs/2,
     open_local_docs/2,
-    read_doc/2,
+    read_doc_body/2,
 
-    make_doc_summary/2,
-    write_doc_summary/2,
+    serialize_doc/2,
+    write_doc_body/2,
     write_doc_infos/4,
     commit_data/1,
 
@@ -331,19 +331,19 @@ open_local_docs(#db{} = Db, DocIds) ->
     Engine:open_local_docs(EngineState, DocIds).
 
 
-read_doc(#db{} = Db, DocPtr) ->
+read_doc_body(#db{} = Db, RawDoc) ->
     #db{engine = {Engine, EngineState}} = Db,
-    Engine:read_doc(EngineState, DocPtr).
+    Engine:read_doc_body(EngineState, RawDoc).
 
 
-make_doc_summary(#db{} = Db, DocParts) ->
+serialize_doc(#db{} = Db, #doc{} = Doc) ->
     #db{engine = {Engine, EngineState}} = Db,
-    Engine:make_doc_summary(EngineState, DocParts).
+    Engine:serialize_doc(EngineState, Doc).
 
 
-write_doc_summary(#db{} = Db, DocSummary) ->
+write_doc_body(#db{} = Db, #doc{} = Doc) ->
     #db{engine = {Engine, EngineState}} = Db,
-    Engine:write_doc_summary(EngineState, DocSummary).
+    Engine:write_doc_body(EngineState, Doc).
 
 
 write_doc_infos(#db{} = Db, DocUpdates, LocalDocs, PurgedDocIdRevs) ->

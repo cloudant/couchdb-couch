@@ -98,7 +98,11 @@ start_applications([App|Apps], Acc) ->
     {error, {not_running, Dep}} ->
         start_applications([Dep, App | Apps], Acc);
     ok ->
-        start_applications(Apps, [App|Acc])
+        start_applications(Apps, [App|Acc]);
+    Else ->
+        io:format(standard_error, "ERROR STARTING APP: ~s :: ~p~n", [App, Else]),
+        timer:sleep(1000),
+        erlang:error(Else)
     end.
 
 stop_applications(Apps) ->

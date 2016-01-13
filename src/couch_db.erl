@@ -1082,18 +1082,24 @@ write_and_commit(#db{main_pid=Pid, user_ctx=Ctx}=Db, DocBuckets1,
 
 prepare_doc_summaries(Db, BucketList) ->
     [lists:map(
-        fun(#doc{body = Body, atts = Atts} = Doc) ->
+        fun(#doc{atts = Atts} = Doc0) ->
             DiskAtts = [couch_att:to_disk_term(Att) || Att <- Atts],
             {ok, SizeInfo} = couch_att:size_info(Atts),
             AttsStream = case Atts of
-            [Att | _] ->
-                {stream, StreamEngine} = couch_att:fetch(data, Att),
-                StreamEngine;
-            [] ->
-                nil
+                [Att | _] ->
+                    {stream, StreamEngine} = couch_att:fetch(data, Att),
+                    StreamEngine;
+                [] ->
+                    nil
             end,
-            SummaryChunk = couch_db_updater:make_doc_summary(Db, {Body, DiskAtts}),
-            Doc#doc{body = {summary, SummaryChunk, SizeInfo, AttsStream}}
+            Doc1 = Doc0#doc{
+                atts = DiskAtts,
+                meta = [
+                    {size_info, SizeInfo},
+                    {atts_stream, AttsStream}
+                ] ++ Doc0#doc.meta
+            },
+            couch_db_engine:serialize_doc(Db, Doc1)
         end,
         Bucket) || Bucket <- BucketList].
 
@@ -1415,27 +1421,23 @@ make_doc(_Db, Id, Deleted, nil = _Bp, RevisionPath) ->
         deleted = Deleted
     };
 make_doc(#db{} = Db, Id, Deleted, Bp, RevisionPath) ->
-    {BodyData, Atts0} = case Bp of
-        nil ->
-            {[], []};
-        _ ->
-            case read_doc(Db, Bp) of
-                {ok, {BodyData0, Atts1}} when is_binary(Atts1) ->
-                    {BodyData0, couch_compress:decompress(Atts1)};
-                {ok, {BodyData0, Atts1}} when is_list(Atts1) ->
-                    % pre 1.2 format
-                    {BodyData0, Atts1}
-            end
-    end,
-    Atts = [couch_att:from_disk_term(Db, T) || T <- Atts0],
-    Doc = #doc{
+    Doc0 = couch_db_engine:read_doc_body(Db, #doc{
         id = Id,
         revs = RevisionPath,
-        body = BodyData,
-        atts = Atts,
+        body = Bp,
         deleted = Deleted
-    },
-    after_doc_read(Db, Doc).
+    }),
+    Doc1 = case Doc0#doc.atts of
+        BinAtts when is_binary(BinAtts) ->
+            Doc0#doc{
+                atts = couch_compress:decompress(BinAtts)
+            };
+        ListAtts when is_list(ListAtts) ->
+            Doc0
+    end,
+    after_doc_read(Db, Doc1#doc{
+        atts = [couch_att:from_disk_term(Db, T) || T <- Doc1#doc.atts]
+    }).
 
 
 after_doc_read(#db{} = Db, Doc) ->

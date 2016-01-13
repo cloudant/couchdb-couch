@@ -366,46 +366,30 @@ flush_trees(#db{} = Db,
     {Flushed, FinalAcc} = couch_key_tree:mapfold(
         fun(_Rev, Value, Type, SizesAcc) ->
             case Value of
-            #doc{deleted = IsDeleted, body = {summary, _, _, _} = DocSummary} ->
-                {summary, Summary, AttSizeInfo, AttsStream} = DocSummary,
-                % this node value is actually an unwritten document summary,
-                % write to disk.
-                % make sure the Fd in the written bins is the same Fd we are
-                % and convert bins, removing the FD.
-                % All bins should have been written to disk already.
-                if AttsStream == nil -> ok; true ->
-                    case couch_db:is_active_stream(Db, AttsStream) of
-                        true ->
-                            ok;
-                        false ->
-                            % Stream where the attachments were written to is
-                            % no longer the current attachment stream. This
-                            % can happen when a database is switched at
-                            % compaction time.
-                            couch_log:debug("Stream where the attachments are"
-                                            " written has changed."
-                                            " Possibly retrying.", []),
-                            throw(retry)
-                    end
-                end,
-                ExternalSize = ?term_size(Summary),
-                {ok, NewSummaryPointer, SummarySize} =
-                    couch_db_engine:write_doc_summary(Db, Summary),
-                Leaf = #leaf{
-                    deleted = IsDeleted,
-                    ptr = NewSummaryPointer,
-                    seq = UpdateSeq,
-                    sizes = #size_info{
-                        active = SummarySize,
-                        external = ExternalSize
+                % This node is a document summary that needs to be
+                % flushed to disk.
+                #doc{} = Doc ->
+                    check_doc_atts(Db, Doc),
+                    ExternalSize = ?term_size(Doc#doc.body),
+                    {size_info, AttSizeInfo} =
+                            lists:keyfind(size_info, 1, Doc#doc.meta),
+                    {ok, NewDoc, WrittenSize} =
+                            couch_db_engine:write_doc_body(Db, Doc),
+                    Leaf = #leaf{
+                        deleted = Doc#doc.deleted,
+                        ptr = NewDoc#doc.body,
+                        seq = UpdateSeq,
+                        sizes = #size_info{
+                            active = WrittenSize,
+                            external = ExternalSize
+                        },
+                        atts = AttSizeInfo
                     },
-                    atts = AttSizeInfo
-                },
-                {Leaf, add_sizes(Type, Leaf, SizesAcc)};
-            #leaf{} ->
-                {Value, add_sizes(Type, Value, SizesAcc)};
-            _ ->
-                {Value, SizesAcc}
+                    {Leaf, add_sizes(Type, Leaf, SizesAcc)};
+                #leaf{} ->
+                    {Value, add_sizes(Type, Value, SizesAcc)};
+                _ ->
+                    {Value, SizesAcc}
             end
         end, {0, 0, []}, Unflushed),
     {FinalAS, FinalES, FinalAtts} = FinalAcc,
@@ -418,6 +402,29 @@ flush_trees(#db{} = Db,
         }
     },
     flush_trees(Db, RestUnflushed, [NewInfo | AccFlushed]).
+
+
+check_doc_atts(Db, Doc) ->
+    {atts_stream, Stream} = lists:keyfind(atts_stream, 1, Doc#doc.meta),
+    % Make sure that the attachments were written to the currently
+    % active attachment stream. If compaction swaps during a write
+    % request we may have to rewrite our attachment bodies.
+    if Stream == nil -> ok; true ->
+        case couch_db:is_active_stream(Db, Stream) of
+            true ->
+                ok;
+            false ->
+                % Stream where the attachments were written to is
+                % no longer the current attachment stream. This
+                % can happen when a database is switched at
+                % compaction time.
+                couch_log:debug("Stream where the attachments were"
+                                " written has changed."
+                                " Possibly retrying.", []),
+                throw(retry)
+        end
+    end.
+    
 
 add_sizes(Type, #leaf{sizes=Sizes, atts=AttSizes}, Acc) ->
     % Maybe upgrade from disk_size only

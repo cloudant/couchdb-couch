@@ -29,13 +29,23 @@ cet_write_attachment() ->
 
     {ok, St4} = Engine:init(DbPath, []),
     [FDI] = Engine:open_docs(St4, [<<"first">>]),
+
     #rev_info{
-        body_sp = Ptr
+        rev = {RevPos, PrevRevId},
+        deleted = Deleted,
+        body_sp = DocPtr
     } = test_engine_util:prev_rev(FDI),
 
-    {ok, {_, Atts0}} = Engine:read_doc(St4, Ptr),
-    Atts1 = if not is_binary(Atts0) -> Atts0; true ->
-        couch_compress:decompress(Atts0)
+    Doc0 = #doc{
+        id = <<"foo">>,
+        revs = {RevPos, [PrevRevId]},
+        deleted = Deleted,
+        body = DocPtr
+    },
+
+    Doc1 = Engine:read_doc_body(St4, Doc0),
+    Atts1 = if not is_binary(Doc1#doc.atts) -> Doc1#doc.atts; true ->
+        couch_compress:decompress(Doc1#doc.atts)
     end,
 
     StreamSrc = fun(Sp) -> Engine:open_read_stream(St4, Sp) end,

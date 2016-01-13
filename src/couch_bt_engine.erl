@@ -22,10 +22,10 @@
 
     open_docs/2,
     open_local_docs/2,
-    read_doc/2,
+    read_doc_body/2,
 
-    make_doc_summary/2,
-    write_doc_summary/2,
+    serialize_doc/2,
+    write_doc_body/2,
     write_doc_infos/4,
 
     commit_data/1,
@@ -268,31 +268,35 @@ open_local_docs(#st{} = St, DocIds) ->
     end, Results).
 
 
-read_doc(#st{} = St, Pos) ->
-    couch_file:pread_term(St#st.fd, Pos).
+read_doc_body(#st{} = St, #doc{} = Doc) ->
+    {ok, {Body, Atts}} = couch_file:pread_term(St#st.fd, Doc#doc.body),
+    Doc#doc{
+        body = Body,
+        atts = Atts
+    }.
 
 
-make_doc_summary(#st{} = St, {Body0, Atts0}) ->
-    Comp = St#st.compression,
-    Body = case couch_compress:is_compressed(Body0, Comp) of
-        true -> Body0;
-        % pre 1.2 database file format
-        false -> couch_compress:compress(Body0, Comp)
+serialize_doc(#st{} = St, #doc{} = Doc) ->
+    Compress = fun(Term) ->
+        case couch_compress:is_compressed(Term, St#st.compression) of
+            true -> Term;
+            false -> couch_compress:compress(Term, St#st.compression)
+        end
     end,
-    Atts = case couch_compress:is_compressed(Atts0, Comp) of
-        true -> Atts0;
-        false -> couch_compress:compress(Atts0, Comp)
-    end,
+    Body = Compress(Doc#doc.body),
+    Atts = Compress(Doc#doc.atts),
     SummaryBin = ?term_to_bin({Body, Atts}),
     Md5 = couch_crypto:hash(md5, SummaryBin),
-    couch_file:assemble_file_chunk(SummaryBin, Md5).
+    Data = couch_file:assemble_file_chunk(SummaryBin, Md5),
+    Doc#doc{body = Data}.
 
 
-write_doc_summary(St, SummaryBinary) ->
+write_doc_body(St, #doc{} = Doc) ->
     #st{
         fd = Fd
     } = St,
-    couch_file:append_raw_chunk(Fd, SummaryBinary).
+    {ok, Ptr, Written} = couch_file:append_raw_chunk(Fd, Doc#doc.body),
+    {ok, Doc#doc{body = Ptr}, Written}.
 
 
 write_doc_infos(#st{} = St, Pairs, LocalDocs, PurgedIdRevs) ->
