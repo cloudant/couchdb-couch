@@ -73,18 +73,8 @@ check_prop_set(Name, Default, Value, CommittedValue) ->
     {ok, St1} = Engine:set(St0, Name, Value),
     ?assertEqual(Value, Engine:get(St1, Name)),
 
-    Engine:terminate(normal, St1),
+    {ok, St2} = Engine:commit_data(St1),
+    Engine:terminate(normal, St2),
 
-    {ok, St2} = Engine:init(DbPath, []),
-    ?assertEqual(Default, Engine:get(St2, Name)),
-
-    {ok, St3} = Engine:set(St2, Name, Value),
-    ?assertEqual(Value, Engine:get(St3, Name)),
-
-    {ok, St4} = Engine:commit_data(St3),
-    Engine:terminate(normal, St4),
-
-    {ok, St5} = Engine:init(DbPath, []),
-    ?assertEqual(CommittedValue, Engine:get(St5, Name)).
-
-    
+    {ok, St3} = Engine:init(DbPath, []),
+    ?assertEqual(CommittedValue, Engine:get(St3, Name)).

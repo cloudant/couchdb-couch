@@ -16,12 +16,13 @@ gather(Module) ->
                 Acc
         end
     end, [], Exports),
-    {
-        setup,
-        fun test_util:start_couch/0,
-        fun test_util:stop_couch/1,
-        lists:reverse(Tests)
-    }.
+    lists:reverse(Tests).
+    %{
+    %    setup,
+    %    fun test_util:start_couch/0,
+    %    fun test_util:stop_couch/1,
+    %    lists:reverse(Tests)
+    %}.
 
 
 make_test_fun(Module, Fun) ->

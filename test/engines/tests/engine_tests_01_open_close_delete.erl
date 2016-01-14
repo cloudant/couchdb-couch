@@ -13,6 +13,8 @@ cet_open_non_existent() ->
     Engine = test_engine_util:get_engine(),
     DbPath = test_engine_util:dbpath(),
 
+    io:format(standard_error, "DB PATH: ~s~n", [DbPath]),
+
     ?assertEqual(false, Engine:exists(DbPath)),
     ?assertThrow({not_found, no_db_file}, Engine:init(DbPath, [])),
     ?assertEqual(false, Engine:exists(DbPath)).
