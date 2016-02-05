@@ -190,7 +190,7 @@ get_db_frag(DbName) ->
     {ok, Info} = couch_db:get_db_info(Db),
     couch_db:close(Db),
     FileSize = get_size(file, Info),
-    DataSize = get_size(external, Info),
+    DataSize = get_size(active, Info),
     {round((FileSize - DataSize) / FileSize * 100), FileSize}.
 
 get_view_frag(DbName) ->
@@ -198,7 +198,7 @@ get_view_frag(DbName) ->
     {ok, Info} = couch_mrview:get_info(Db, <<"_design/foo">>),
     couch_db:close(Db),
     FileSize = get_size(file, Info),
-    DataSize = get_size(external, Info),
+    DataSize = get_size(active, Info),
     {round((FileSize - DataSize) / FileSize * 100), FileSize}.
 
 get_size(Kind, Info) ->
