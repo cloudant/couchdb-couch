@@ -219,7 +219,7 @@ configure_filter("_view", Style, Req, Db) ->
             catch _:_ ->
                 view
             end,
-            case Db#db.id_tree of
+            case Db#db.main_pid of
                 undefined ->
                     DIR = fabric_util:doc_id_and_rev(DDoc),
                     {fetch, FilterType, Style, DIR, VName};
@@ -242,7 +242,7 @@ configure_filter(FilterName, Style, Req, Db) ->
         [DName, FName] ->
             {ok, DDoc} = open_ddoc(Db, <<"_design/", DName/binary>>),
             check_member_exists(DDoc, [<<"filters">>, FName]),
-            case Db#db.id_tree of
+            case Db#db.main_pid of
                 undefined ->
                     DIR = fabric_util:doc_id_and_rev(DDoc),
                     {fetch, custom, Style, Req, DIR, FName};
@@ -378,7 +378,7 @@ check_selector(_Selector) ->
     throw({bad_request, "Selector error: expected a JSON object"}).
 
 
-open_ddoc(#db{name=DbName, id_tree=undefined}, DDocId) ->
+open_ddoc(#db{name=DbName, main_pid=undefined}, DDocId) ->
     case ddoc_cache:open_doc(mem3:dbname(DbName), DDocId) of
         {ok, _} = Resp -> Resp;
         Else -> throw(Else)
@@ -514,7 +514,8 @@ send_changes(Acc, Dir, FirstRound) ->
                 {#mrview{}, {fast_view, _, _, _}} ->
                     couch_mrview:view_changes_since(View, StartSeq, DbEnumFun, [{dir, Dir}], Acc);
                 {undefined, _} ->
-                    couch_db:changes_since(Db, StartSeq, DbEnumFun, [{dir, Dir}], Acc);
+                    Opts = [doc_info, {dir, Dir}],
+                    couch_db:fold_changes(Db, StartSeq, DbEnumFun, Acc, Opts);
                 {#mrview{}, _} ->
                     ViewEnumFun = fun view_changes_enumerator/2,
                     {Go, Acc0} = couch_mrview:view_changes_since(View, StartSeq, ViewEnumFun, [{dir, Dir}], Acc),
@@ -549,20 +550,24 @@ can_optimize(_, _) ->
 
 
 send_changes_doc_ids(Db, StartSeq, Dir, Fun, Acc0, {doc_ids, _Style, DocIds}) ->
-    Lookups = couch_btree:lookup(Db#db.id_tree, DocIds),
+    Results = couch_db:open_docs(Db, DocIds, [full_doc_info]),
     FullInfos = lists:foldl(fun
-        ({ok, FDI}, Acc) -> [FDI | Acc];
+        (#full_doc_info{}=FDI, Acc) -> [FDI | Acc];
         (not_found, Acc) -> Acc
-    end, [], Lookups),
+    end, [], Results),
     send_lookup_changes(FullInfos, StartSeq, Dir, Db, Fun, Acc0).
 
 
 send_changes_design_docs(Db, StartSeq, Dir, Fun, Acc0, {design_docs, _Style}) ->
-    FoldFun = fun(FullDocInfo, _, Acc) ->
+    FoldFun = fun(FullDocInfo, Acc) ->
         {ok, [FullDocInfo | Acc]}
     end,
-    KeyOpts = [{start_key, <<"_design/">>}, {end_key_gt, <<"_design0">>}],
-    {ok, _, FullInfos} = couch_btree:fold(Db#db.id_tree, FoldFun, [], KeyOpts),
+    KeyOpts = [
+        include_deleted,
+        {start_key, <<"_design/">>},
+        {end_key_gt, <<"_design0">>}
+    ],
+    {ok, FullInfos} = couch_db:fold_docs(Db, FoldFun, [], KeyOpts),
     send_lookup_changes(FullInfos, StartSeq, Dir, Db, Fun, Acc0).
 
 
