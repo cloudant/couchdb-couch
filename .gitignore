@@ -9,5 +9,10 @@ priv/*.exp
 priv/*.lib
 vc120.pdb
 
+test/engines/coverage/
+test/engines/data/
+test/engines/etc/
+test/engines/log/
+
 .rebar/
 .eunit
