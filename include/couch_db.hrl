@@ -78,7 +78,8 @@
     update_seq = 0,
     deleted = false,
     rev_tree = [],
-    sizes = #size_info{}
+    sizes = #size_info{},
+    meta = []
 }).
 
 -record(httpd, {
@@ -129,30 +130,29 @@
 }).
 
 -record(db, {
-    main_pid = nil,
-    compactor_pid = nil,
-    instance_start_time, % number of microsecs since jan 1 1970 as a binary string
-    fd,
-    fd_monitor,
-    header = couch_db_header:new(),
-    committed_update_seq,
-    id_tree,
-    seq_tree,
-    local_tree,
-    update_seq,
     name,
     filepath,
-    validate_doc_funs = undefined,
-    security = [],
-    security_ptr = nil,
+
+    engine = {couch_bt_engine, undefined},
+
+    main_pid = nil,
+    compactor_pid = nil,
+
+    committed_update_seq,
+
+    instance_start_time, % number of microsecs since jan 1 1970 as a binary string
+
     user_ctx = #user_ctx{},
-    waiting_delayed_commit = nil,
-    revs_limit = 1000,
-    fsync_options = [],
-    options = [],
-    compression,
+    security = [],
+    validate_doc_funs = undefined,
+
     before_doc_update = nil, % nil | fun(Doc, Db) -> NewDoc
-    after_doc_read = nil    % nil | fun(Doc, Db) -> NewDoc
+    after_doc_read = nil,    % nil | fun(Doc, Db) -> NewDoc
+
+    waiting_delayed_commit = nil,
+
+    options = [],
+    compression
 }).
 
 -record(view_fold_helper_funs, {

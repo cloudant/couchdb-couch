@@ -475,9 +475,6 @@
         {ok, CompactedDbHandle::db_handle()}.
 
 
--include("couch_db_int.hrl").
-
-
 -export([
     exists/2,
     delete/4,
