@@ -648,31 +648,19 @@ log_request(#httpd{mochi_req=MochiReq,peer=Peer}=Req, Code) ->
             gen_event:notify(couch_plugin, {log_request, Req, Code})
     end.
 
-start_response_length(#httpd{mochi_req=MochiReq}=Req, Code, Headers, Length) ->
-    log_request(Req, Code),
-    couch_stats:increment_counter([couchdb, httpd_status_codes, Code]),
-    Headers1 = Headers ++ server_header() ++
-               couch_httpd_auth:cookie_auth_header(Req, Headers),
-    Headers2 = couch_httpd_cors:cors_headers(Req, Headers1),
-    Resp = MochiReq:start_response_length({Code, Headers2, Length}),
-    case MochiReq:get(method) of
-    'HEAD' -> throw({http_head_abort, Resp});
-    _ -> ok
-    end,
-    {ok, Resp}.
+start_response(Req, Code, Headers) ->
+    start_response_length(Req, Code, Headers, undefined).
 
-start_response(#httpd{mochi_req=MochiReq}=Req, Code, Headers) ->
-    log_request(Req, Code),
-    couch_stats:increment_counter([couchdb, httpd_status_codes, Code]),
-    CookieHeader = couch_httpd_auth:cookie_auth_header(Req, Headers),
-    Headers1 = Headers ++ server_header() ++ CookieHeader,
-    Headers2 = couch_httpd_cors:cors_headers(Req, Headers1),
-    Resp = MochiReq:start_response({Code, Headers2}),
-    case MochiReq:get(method) of
+start_response_length(Req, Code, Headers0, Length) ->
+    Headers = basic_headers(Req, Headers0),
+    {Resp, _, _, _} = maybe_modify_and_call(
+        fun start_response_/2, Req, Code, Headers, Length),
+    case method(Resp) of
         'HEAD' -> throw({http_head_abort, Resp});
         _ -> ok
     end,
     {ok, Resp}.
+
 
 send(Resp, Data) ->
     Resp:send(Data),
@@ -686,28 +674,50 @@ no_resp_conn_header([{Hdr, _}|Rest]) ->
         _ -> no_resp_conn_header(Rest)
     end.
 
-http_1_0_keep_alive(Req, Headers) ->
-    KeepOpen = Req:should_close() == false,
-    IsHttp10 = Req:get(version) == {1, 0},
+http_1_0_keep_alive(#httpd{mochi_req = MochiReq}, Headers) ->
+    http_1_0_keep_alive(MochiReq, Headers);
+http_1_0_keep_alive(MochiReq, Headers) ->
+    KeepOpen = MochiReq:should_close() == false,
+    IsHttp10 = MochiReq:get(version) == {1, 0},
     NoRespHeader = no_resp_conn_header(Headers),
     case KeepOpen andalso IsHttp10 andalso NoRespHeader of
         true -> [{"Connection", "Keep-Alive"} | Headers];
         false -> Headers
     end.
 
-start_chunked_response(#httpd{mochi_req=MochiReq}=Req, Code, Headers) ->
-    log_request(Req, Code),
-    couch_stats:increment_counter([couchdb, httpd_status_codes, Code]),
-    Headers1 = http_1_0_keep_alive(MochiReq, Headers),
-    Headers2 = Headers1 ++ server_header() ++
-               couch_httpd_auth:cookie_auth_header(Req, Headers1),
-    Headers3 = couch_httpd_cors:cors_headers(Req, Headers2),
-    Resp = MochiReq:respond({Code, Headers3, chunked}),
-    case MochiReq:get(method) of
-    'HEAD' -> throw({http_head_abort, Resp});
-    _ -> ok
+start_chunked_response(Req, Code, Headers0) ->
+    Headers = add_headers(Req, Headers0),
+    {Resp, _, _, _} = maybe_modify_and_call(
+        fun respond_/2, Req, Code, Headers, chunked),
+    case method(Resp) of
+        'HEAD' -> throw({http_head_abort, Resp});
+        _ -> ok
     end,
     {ok, Resp}.
+
+method(MochiResp) ->
+    MochiReq = MochiResp:get(request),
+    MochiReq:get(method).
+
+%% maybe modify Req, Code, Headers, and Val via before_response plugins,
+%% then call Fun on those modified parameters
+maybe_modify_and_call(Fun, Req0, Code0, Headers0, Val0) ->
+    {ok, {Req, Code, Headers, Val}} =
+        chttpd_plugin:before_response(Req0, Code0, Headers0, Val0),
+    log_request(Req, Code),
+    couch_stats:increment_counter([couchdb, httpd_status_codes, Code]),
+    {Fun(Req, {Code, Headers, Val}), Code, Headers, Val}.
+
+
+%% wrappers to treat mochiweb "method" as a fun
+start_response_(#httpd{mochi_req = MochiReq}, {Code, Headers, undefined}) ->
+    MochiReq:start_response({Code, Headers});
+start_response_(#httpd{mochi_req = MochiReq}, {Code, Headers, Length}) ->
+    MochiReq:start_response_length({Code, Headers, Length}).
+
+respond_(#httpd{mochi_req = MochiReq}, {Code, Headers, Body}) ->
+    MochiReq:respond({Code, Headers, Body}).
+
 
 send_chunk(Resp, Data) ->
     case iolist_size(Data) of
@@ -720,26 +730,21 @@ last_chunk(Resp) ->
     Resp:write_chunk([]),
     {ok, Resp}.
 
-send_response(#httpd{mochi_req=MochiReq0}=Req0, Code0, Headers0, {Type, Value0}) ->
-    {ok, {#httpd{mochi_req=MochiReq}=Req, Code, Headers, Value}} =
-        chttpd_plugin:before_response(Req0, Code0, Headers0, Value0),
-
-    log_request(Req, Code),
-    couch_stats:increment_counter([couchdb, httpd_status_codes, Code]),
-
-    Body = make_body({Type, Value}),
-
-    if Code >= 500 ->
-        couch_log:error("httpd ~p error response:~n ~s", [Code, Body]);
-    Code >= 400 ->
-        couch_log:debug("httpd ~p error response:~n ~s", [Code, Body]);
-    true -> ok
-    end,
-
-    {ok, MochiReq:respond({Code, Headers, Body})};
+send_response(Req, Code0, Headers0, {Type, Value}) ->
+    Body0 = make_body({Type, Value}),
+    {Resp, Code, _, Body} = maybe_modify_and_call(
+        fun respond_/2, Req, Code0, Headers0, Body0),
+    maybe_log_response(Code, Body),
+    {ok, Resp};
 send_response(Req, Code, Headers, Value) ->
-    AllHeaders = add_headers(Req, Headers),
-    send_response(Req, Code, AllHeaders, {io_list, Value}).
+    send_response(Req, Code, Headers, {io_list, Value}).
+
+maybe_log_response(Code, Body) when Code >= 500 ->
+    couch_log:error("httpd ~p error response:~n ~s", [Code, Body]);
+maybe_log_response(Code, Body) when Code >= 400 ->
+    couch_log:debug("httpd ~p error response:~n ~s", [Code, Body]);
+maybe_log_response(_, _) ->
+    ok.
 
 make_body({json, JsonObj}) ->
     [start_jsonp(), ?JSON_ENCODE(JsonObj), end_jsonp(), $\n];
@@ -761,13 +766,14 @@ send_json(Req, Code, Headers, Value) ->
     AllHeaders = add_headers(Req, maybe_add_default_headers(Req, Headers)),
     send_response(Req, Code, AllHeaders, {json, Value}).
 
-add_headers(#httpd{mochi_req=MochiReq}=Req, Headers) ->
-    Headers1 = http_1_0_keep_alive(MochiReq, Headers),
+add_headers(Req, Headers0) ->
+    Headers = basic_headers(Req, Headers0),
+    http_1_0_keep_alive(Req, Headers).
 
-    Headers2 = Headers1 ++ server_header() ++
-               couch_httpd_auth:cookie_auth_header(Req, Headers1),
-
-    couch_httpd_cors:cors_headers(Req, Headers2).
+basic_headers(Req, Headers0) ->
+    Headers = Headers0 ++ server_header() ++
+        couch_httpd_auth:cookie_auth_header(Req, Headers0),
+    couch_httpd_cors:cors_headers(Req, Headers).
 
 start_json_response(Req, Code) ->
     start_json_response(Req, Code, []).
