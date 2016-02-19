@@ -10,13 +10,13 @@
 % License for the specific language governing permissions and limitations under
 % the License.
 
--module(couch_http).
+-module(couch_http_stack).
 -include_lib("couch/include/couch_db.hrl").
 -include_lib("couch_httpd/include/couch_httpd.hrl").
 
 -define(HANDLER_NAME_IN_MODULE_POS, 6).
 
--record(couch_http, {name, protocol, port, bind_address}).
+-record(couch_http_stack, {name, protocol, port, bind_address}).
 
 -export([
     start_link/1,
@@ -41,33 +41,33 @@ start_link(http) ->
     start_link(new(backdoor_http, http));
 start_link(https) ->
     start_link(new(backdoor_https, https));
-start_link(#couch_http{} = Stack) ->
+start_link(#couch_http_stack{} = Stack) ->
     set_auth_handlers(),
     couch_httpd:start_link(Stack).
 
 new(Name, Protocol) ->
-    #couch_http{
+    #couch_http_stack{
         name = Name,
         protocol = Protocol,
         port = config:get("httpd", "port", "5984"),
         bind_address = bind_address()
     }.
 
-name(#couch_http{name = Name}) -> Name.
+name(#couch_http_stack{name = Name}) -> Name.
 
-protocol(#couch_http{protocol = Protocol}) -> Protocol.
+protocol(#couch_http_stack{protocol = Protocol}) -> Protocol.
 
-port(#couch_http{port = Port}) -> Port.
+port(#couch_http_stack{port = Port}) -> Port.
 
-bind_address(#couch_http{bind_address = Address}) -> Address.
+bind_address(#couch_http_stack{bind_address = Address}) -> Address.
 
 
-server_options(#couch_http{}) ->
+server_options(#couch_http_stack{}) ->
     ServerOptsCfg = config:get("httpd", "server_options", "[]"),
     {ok, ServerOpts} = couch_util:parse_term(ServerOptsCfg),
     ServerOpts.
 
-socket_options(#couch_http{}) ->
+socket_options(#couch_http_stack{}) ->
     case config:get("httpd", "socket_options") of
         undefined ->
             undefined;
@@ -81,7 +81,6 @@ authenticate(Req) ->
     couch_httpd_handler:authenticate_request(Req, couch_auth_cache, AuthenticationFuns).
 
 authorize(Req) -> Req.
-
 
 bind_address() ->
     case config:get("httpd", "bind_address", "any") of
