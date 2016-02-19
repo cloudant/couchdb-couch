@@ -32,6 +32,11 @@
     socket_options/1
 ]).
 
+-export([
+    authenticate/1,
+    authorize/1
+]).
+
 start_link(http) ->
     start_link(new(backdoor_http, http));
 start_link(https) ->
@@ -70,6 +75,12 @@ socket_options(#couch_http{}) ->
             {ok, SocketOpts} = couch_util:parse_term(SocketOptsCfg),
             SocketOpts
     end.
+
+authenticate(Req) ->
+    {ok, AuthenticationFuns} = application:get_env(couch, auth_handlers),
+    couch_httpd_handler:authenticate_request(Req, couch_auth_cache, AuthenticationFuns).
+
+authorize(Req) -> Req.
 
 
 bind_address() ->
