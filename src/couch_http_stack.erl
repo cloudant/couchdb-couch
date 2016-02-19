@@ -37,6 +37,12 @@
     authorize/1
 ]).
 
+-export([
+    default_url_handler/1,
+    default_db_handler/1,
+    default_design_handler/1
+]).
+
 start_link(http) ->
     start_link(new(backdoor_http, http));
 start_link(https) ->
@@ -81,6 +87,11 @@ authenticate(Req) ->
     couch_httpd_handler:authenticate_request(Req, couch_auth_cache, AuthenticationFuns).
 
 authorize(Req) -> Req.
+
+default_url_handler(#couch_http_stack{}) -> fun couch_httpd_db:handle_request/1.
+default_db_handler(#couch_http_stack{}) -> fun couch_httpd_db:db_req/2.
+default_design_handler(#couch_http_stack{}) -> fun couch_httpd_db:bad_action_req/3.
+
 
 bind_address() ->
     case config:get("httpd", "bind_address", "any") of

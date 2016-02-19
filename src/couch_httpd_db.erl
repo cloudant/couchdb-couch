@@ -19,6 +19,10 @@
     handle_design_info_req/3, parse_copy_destination_header/1,
     parse_changes_query/2, handle_changes_req/4]).
 
+-export([
+    bad_action_req/3
+]).
+
 -import(couch_httpd,
     [send_json/2,send_json/3,send_json/4,send_method_not_allowed/2,
     start_json_response/2,send_chunk/2,last_chunk/1,end_json_response/1,
@@ -35,7 +39,8 @@
 
 % Database request handlers
 handle_request(#httpd{path_parts=[DbName|RestParts],method=Method,
-        db_url_handlers=DbUrlHandlers}=Req)->
+        stack = Stack
+    }=Req)->
     case {Method, RestParts} of
     {'PUT', []} ->
         create_db_req(Req, DbName);
@@ -51,7 +56,7 @@ handle_request(#httpd{path_parts=[DbName|RestParts],method=Method,
     {_, []} ->
         do_db_req(Req, fun db_req/2);
     {_, [SecondPart|_]} ->
-        Handler = couch_util:dict_find(SecondPart, DbUrlHandlers, fun db_req/2),
+        Handler = couch_httpd_handlers:db_handler(SecondPart, Stack),
         do_db_req(Req, Handler)
     end.
 
@@ -182,7 +187,7 @@ handle_compact_req(Req, _Db) ->
 
 handle_design_req(#httpd{
         path_parts=[_DbName, _Design, DesignName, <<"_",_/binary>> = Action | _Rest],
-        design_url_handlers = DesignUrlHandlers
+        stack = Stack
     }=Req, Db) ->
     case couch_db:is_system_db(Db) of
     true ->
@@ -198,13 +203,16 @@ handle_design_req(#httpd{
     % load ddoc
     DesignId = <<"_design/", DesignName/binary>>,
     DDoc = couch_httpd_db:couch_doc_open(Db, DesignId, nil, [ejson_body]),
-    Handler = couch_util:dict_find(Action, DesignUrlHandlers, fun(_, _, _) ->
-        throw({not_found, <<"missing handler: ", Action/binary>>})
-    end),
+    Handler = couch_httpd_handlers:design_handler(Action, Stack),
     Handler(Req, Db, DDoc);
 
 handle_design_req(Req, Db) ->
     db_req(Req, Db).
+
+bad_action_req(#httpd{
+        path_parts=[_DbName, _Design, _DesignName, <<"_",_/binary>> = Action | _Rest]},
+    _Db, _DDoc) ->
+    throw({not_found, <<"missing handler: ", Action/binary>>}).
 
 handle_design_info_req(#httpd{
             method='GET',
