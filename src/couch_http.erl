@@ -16,6 +16,69 @@
 
 -define(HANDLER_NAME_IN_MODULE_POS, 6).
 
+-record(couch_http, {name, protocol, port, bind_address}).
+
+-export([
+    start_link/1,
+    new/2
+]).
+
+-export([
+    name/1,
+    protocol/1,
+    port/1,
+    bind_address/1,
+    server_options/1,
+    socket_options/1
+]).
+
+start_link(http) ->
+    start_link(new(backdoor_http, http));
+start_link(https) ->
+    start_link(new(backdoor_https, https));
+start_link(#couch_http{} = Stack) ->
+    set_auth_handlers(),
+    couch_httpd:start_link(Stack).
+
+new(Name, Protocol) ->
+    #couch_http{
+        name = Name,
+        protocol = Protocol,
+        port = config:get("httpd", "port", "5984"),
+        bind_address = bind_address()
+    }.
+
+name(#couch_http{name = Name}) -> Name.
+
+protocol(#couch_http{protocol = Protocol}) -> Protocol.
+
+port(#couch_http{port = Port}) -> Port.
+
+bind_address(#couch_http{bind_address = Address}) -> Address.
+
+
+server_options(#couch_http{}) ->
+    ServerOptsCfg = config:get("httpd", "server_options", "[]"),
+    {ok, ServerOpts} = couch_util:parse_term(ServerOptsCfg),
+    ServerOpts.
+
+socket_options(#couch_http{}) ->
+    case config:get("httpd", "socket_options") of
+        undefined ->
+            undefined;
+        SocketOptsCfg ->
+            {ok, SocketOpts} = couch_util:parse_term(SocketOptsCfg),
+            SocketOpts
+    end.
+
+
+bind_address() ->
+    case config:get("httpd", "bind_address", "any") of
+        "any" -> any;
+        Else -> Else
+    end.
+
+
 set_auth_handlers() ->
     AuthenticationSrcs = make_fun_spec_strs(
         config:get("httpd", "authentication_handlers", "")),
