@@ -48,6 +48,10 @@ start_link(http) ->
 start_link(https) ->
     start_link(new(backdoor_https, https));
 start_link(#couch_http_stack{} = Stack) ->
+    % ensure uuid is set so that concurrent replications
+    % get the same value.
+    couch_server:get_uuid(),
+
     set_auth_handlers(),
     couch_httpd:start_link(Stack).
 
