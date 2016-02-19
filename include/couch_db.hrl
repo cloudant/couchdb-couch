@@ -101,7 +101,8 @@
     original_method,
     nonce,
     cors_config,
-    qs
+    qs,
+    stack
 }).
 
 
