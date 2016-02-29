@@ -89,6 +89,6 @@ session(Url) ->
     jiffy:decode(Body).
 
 port(clustered) ->
-    integer_to_list(mochiweb_socket_server:get(chttpd, port));
+    couch_httpd:port(clustered_http);
 port(backdoor) ->
-    integer_to_list(mochiweb_socket_server:get(couch_httpd, port)).
+    couch_httpd:port(backdoor_http).

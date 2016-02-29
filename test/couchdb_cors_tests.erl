@@ -36,7 +36,7 @@ setup() ->
     config:set("cors", "origins", "http://example.com", false),
 
     Addr = config:get("httpd", "bind_address", "127.0.0.1"),
-    Port = integer_to_list(mochiweb_socket_server:get(couch_httpd, port)),
+    Port = couch_httpd:port(backdoor_http),
     Host = "http://" ++ Addr ++ ":" ++ Port,
     {Host, ?b2l(DbName)}.
 

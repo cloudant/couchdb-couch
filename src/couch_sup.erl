@@ -145,9 +145,13 @@ get_scheme(couch_httpd) -> "http";
 get_scheme(https) -> "https".
 
 
+get_port(couch_httpd) ->
+    get_port(backdoor_http);
+get_port(https) ->
+    get_port(backdoor_https);
 get_port(Name) ->
     try
-        mochiweb_socket_server:get(Name, port)
+        couch_httpd:port(Name)
     catch
         exit:{noproc, _} ->
             undefined

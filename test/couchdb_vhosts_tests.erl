@@ -46,7 +46,7 @@ setup() ->
     couch_db:ensure_full_commit(Db),
     couch_db:close(Db),
 
-    test_util:with_process_restart(couch_httpd, fun() ->
+    test_util:with_process_restart(backdoor_http, fun() ->
         config:set("httpd_global_handlers", "_utils",
             "{couch_httpd_misc_handlers, handle_utils_dir_req, <<\""
                 ++ ?TEMPDIR
@@ -55,7 +55,7 @@ setup() ->
     end),
 
     Addr = config:get("httpd", "bind_address", "127.0.0.1"),
-    Port = integer_to_list(mochiweb_socket_server:get(couch_httpd, port)),
+    Port = couch_httpd:port(backdoor_http),
     Url = "http://" ++ Addr ++ ":" ++ Port,
     {Url, ?b2l(DbName)}.
 
@@ -90,7 +90,7 @@ setup_oauth() ->
     couch_db:close(Db),
 
     Addr = config:get("httpd", "bind_address", "127.0.0.1"),
-    Port = integer_to_list(mochiweb_socket_server:get(couch_httpd, port)),
+    Port = couch_httpd:port(backdoor_http),
     Url = "http://" ++ Addr ++ ":" ++ Port,
     {Url, ?b2l(DbName)}.
 

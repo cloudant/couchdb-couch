@@ -39,8 +39,8 @@ setup() ->
     {ok, Db} = couch_db:create(DbName, []),
     ok = couch_db:close(Db),
     Addr = config:get("httpd", "bind_address", "127.0.0.1"),
-    Port = mochiweb_socket_server:get(couch_httpd, port),
-    Host = Addr ++ ":" ++ ?i2l(Port),
+    Port = couch_httpd:port(backdoor_http),
+    Host = Addr ++ ":" ++ Port,
     {Host, ?b2l(DbName)}.
 
 setup({binary, standalone}) ->
@@ -540,7 +540,8 @@ chunked_body([Chunk | Rest], Acc) ->
 
 get_socket() ->
     Options = [binary, {packet, 0}, {active, false}],
-    Port = mochiweb_socket_server:get(couch_httpd, port),
+
+    Port = list_to_integer(couch_httpd:port(backdoor_http)),
     {ok, Sock} = gen_tcp:connect(bind_address(), Port, Options),
     Sock.
 
