@@ -174,11 +174,11 @@ verify_we_fail_if_missing({design_handler = Endpoint, {Path, _M, _Fun}}, _) ->
     end).
 
 handler(url_handler, HandlerKey) ->
-    chttpd_handlers:url_handler(HandlerKey);
+    chttpd_http_handlers_plugin:url_handler(HandlerKey);
 handler(db_handler, HandlerKey) ->
-    chttpd_handlers:db_handler(HandlerKey);
+    chttpd_http_handlers_plugin:db_handler(HandlerKey);
 handler(design_handler, HandlerKey) ->
-    chttpd_handlers:design_handler(HandlerKey).
+    chttpd_http_handlers_plugin:design_handler(HandlerKey).
 
 dummy(_, _, _) ->
     throw(error).
