@@ -295,10 +295,10 @@ validate_doc_update(DDoc, EditDoc, DiskDoc, Ctx, SecObj) ->
 
 
 rewrite(Req, Db, DDoc) ->
-    Fields = [F || F <- chttpd_external:json_req_obj_fields(),
+    Fields = [F || F <- couch_httpd_external:json_req_obj_fields(),
               F =/= <<"info">>, F =/= <<"form">>,
               F =/= <<"uuid">>, F =/= <<"id">>],
-    JsonReq = chttpd_external:json_req_obj(Req, Db, null, Fields),
+    JsonReq = couch_httpd_external:json_req_obj(Req, Db, null, Fields),
     case couch_query_servers:ddoc_prompt(DDoc, [<<"rewrites">>], [JsonReq]) of
         {[{<<"forbidden">>, Message}]} ->
             throw({forbidden, Message});
