@@ -29,13 +29,15 @@ app() ->
 
 providers() ->
     [
-        {chttpd_handlers, couch_httpd_handlers}
+        {chttpd_handlers, couch_http_clustered_handlers},
+        {http_backdoor_handlers, couch_http_backdoor_handlers}
     ].
 
 
 services() ->
     [
-        {couch_db, couch_db_plugin}
+        {couch_db, couch_db_plugin},
+        {http_backdoor_handlers, couch_http_handlers_plugin}
     ].
 
 data_subscriptions() ->

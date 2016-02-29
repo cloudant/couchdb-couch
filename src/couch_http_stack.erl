@@ -20,6 +20,8 @@
 
 -export([
     start_link/1,
+    stop/0,
+    stop/1,
     new/2
 ]).
 
@@ -33,14 +35,14 @@
 ]).
 
 -export([
-    authenticate/1,
-    authorize/1
+    authenticate/2,
+    authorize/2
 ]).
 
 -export([
-    default_url_handler/1,
-    default_db_handler/1,
-    default_design_handler/1
+    url_handler/2,
+    db_handler/2,
+    design_handler/2
 ]).
 
 start_link(http) ->
@@ -51,9 +53,23 @@ start_link(#couch_http_stack{} = Stack) ->
     % ensure uuid is set so that concurrent replications
     % get the same value.
     couch_server:get_uuid(),
-
+    set_handlers(),
     set_auth_handlers(),
+    couch_httpd_config_listener:subscribe(Stack, [
+        {"httpd", "bind_address"},
+        {"httpd", "port"},
+        {"httpd", "backlog"},
+        {"httpd", "server_options"}
+    ]),
     couch_httpd:start_link(Stack).
+
+stop() ->
+    ok = couch_httpd_handler:stop(backdoor_http),
+    ok = couch_httpd_handler:stop(backdoor_https),
+    ok.
+
+stop(#couch_http_stack{name = Name}) ->
+    couch_httpd_handler:stop(Name).
 
 new(Name, Protocol) ->
     #couch_http_stack{
@@ -86,16 +102,21 @@ socket_options(#couch_http_stack{}) ->
             SocketOpts
     end.
 
-authenticate(Req) ->
+authenticate(Req, _Stack) ->
     {ok, AuthenticationFuns} = application:get_env(couch, auth_handlers),
     couch_httpd_handler:authenticate_request(Req, couch_auth_cache, AuthenticationFuns).
 
-authorize(Req) -> Req.
+authorize(Req, _Stack) -> Req.
 
-default_url_handler(#couch_http_stack{}) -> fun couch_httpd_db:handle_request/1.
-default_db_handler(#couch_http_stack{}) -> fun couch_httpd_db:db_req/2.
-default_design_handler(#couch_http_stack{}) -> fun couch_httpd_db:bad_action_req/3.
 
+url_handler(HandlerKey, #couch_http_stack{}) ->
+    couch_http_handlers_plugin:url_handler(HandlerKey).
+
+db_handler(HandlerKey, #couch_http_stack{}) ->
+    couch_http_handlers_plugin:db_handler(HandlerKey).
+
+design_handler(HandlerKey, #couch_http_stack{}) ->
+    couch_http_handlers_plugin:design_handler(HandlerKey).
 
 bind_address() ->
     case config:get("httpd", "bind_address", "any") of
@@ -104,11 +125,34 @@ bind_address() ->
     end.
 
 
+set_handlers() ->
+    UrlHandlersList = lists:map(
+        fun({UrlKey, SpecStr}) ->
+            {?l2b(UrlKey), couch_httpd_util:fun_from_spec(SpecStr, 1)}
+        end, config:get("httpd_global_handlers")),
+
+    DbUrlHandlersList = lists:map(
+        fun({UrlKey, SpecStr}) ->
+            {?l2b(UrlKey), couch_httpd_util:fun_from_spec(SpecStr, 2)}
+        end, config:get("httpd_db_handlers")),
+
+    DesignUrlHandlersList = lists:map(
+        fun({UrlKey, SpecStr}) ->
+            {?l2b(UrlKey), couch_httpd_util:fun_from_spec(SpecStr, 3)}
+        end, config:get("httpd_design_handlers")),
+
+    ok = application:set_env(couch, url_handlers, dict:from_list(UrlHandlersList)),
+    ok = application:set_env(couch, db_handlers, dict:from_list(DbUrlHandlersList)),
+    ok = application:set_env(couch, design_handlers, dict:from_list(DesignUrlHandlersList)),
+    ok.
+
 set_auth_handlers() ->
     AuthenticationSrcs = make_fun_spec_strs(
         config:get("httpd", "authentication_handlers", "")),
     AuthHandlers = lists:map(
-        fun(A) -> {auth_handler_name(A), make_arity_1_fun(A)} end, AuthenticationSrcs),
+        fun(A) ->
+            {auth_handler_name(A), couch_httpd_util:fun_from_spec(A, 1)}
+        end, AuthenticationSrcs),
     AuthenticationFuns = AuthHandlers ++ [
         {<<"local">>, fun couch_httpd_auth:party_mode_handler/1} %% should be last
     ],
@@ -120,13 +164,3 @@ auth_handler_name(SpecStr) ->
 % SpecStr is "{my_module, my_fun}, {my_module2, my_fun2}"
 make_fun_spec_strs(SpecStr) ->
     re:split(SpecStr, "(?<=})\\s*,\\s*(?={)", [{return, list}]).
-
-% SpecStr is a string like "{my_module, my_fun}"
-%  or "{my_module, my_fun, <<"my_arg">>}"
-make_arity_1_fun(SpecStr) ->
-    case couch_util:parse_term(SpecStr) of
-    {ok, {Mod, Fun, SpecArg}} ->
-        fun(Arg) -> Mod:Fun(Arg, SpecArg) end;
-    {ok, {Mod, Fun}} ->
-        fun(Arg) -> Mod:Fun(Arg) end
-    end.

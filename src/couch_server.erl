@@ -216,19 +216,19 @@ handle_config_change("admins", _, _, Persist, _) ->
     % spawn here so couch event manager doesn't deadlock
     {ok, spawn(fun() -> hash_admin_passwords(Persist) end)};
 handle_config_change("httpd", "authentication_handlers", _, _, _) ->
-    {ok, couch_httpd:stop()};
+    {ok, couch_http_stack:stop()};
 handle_config_change("httpd", "bind_address", _, _, _) ->
-    {ok, couch_httpd:stop()};
+    {ok, couch_http_stack:stop()};
 handle_config_change("httpd", "port", _, _, _) ->
-    {ok, couch_httpd:stop()};
+    {ok, couch_http_stack:stop()};
 handle_config_change("httpd", "max_connections", _, _, _) ->
-    {ok, couch_httpd:stop()};
+    {ok, couch_http_stack:stop()};
 handle_config_change("httpd", "default_handler", _, _, _) ->
-    {ok, couch_httpd:stop()};
+    {ok, couch_http_stack:stop()};
 handle_config_change("httpd_global_handlers", _, _, _, _) ->
-    {ok, couch_httpd:stop()};
+    {ok, couch_http_stack:stop()};
 handle_config_change("httpd_db_handlers", _, _, _, _) ->
-    {ok, couch_httpd:stop()};
+    {ok, couch_http_stack:stop()};
 handle_config_change(_, _, _, _, _) ->
     {ok, nil}.
 
