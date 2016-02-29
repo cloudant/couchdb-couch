@@ -29,7 +29,7 @@ app() ->
 
 providers() ->
     [
-        {chttpd_handlers, couch_http_clustered_handlers},
+        {http_clustered_handlers, couch_http_clustered_handlers},
         {http_backdoor_handlers, couch_http_backdoor_handlers}
     ].
 
