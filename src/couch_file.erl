@@ -247,16 +247,26 @@ delete_file(FilePath) ->
 deleted_filename(_RootDir, Original, rename) ->
     deleted_filename(Original, "deleted");
 deleted_filename(RootDir, Original, _Strategy) ->
-    Tokens = lists:foldl(fun
-        ("shards", Acc) when length(Acc) =:= 0 -> Acc;
-        (".shards", Acc) when length(Acc) =:= 0 -> Acc;
-        ("mrview", Acc) when length(Acc) >= 2 -> Acc;
-        (Token, Acc) -> [Token | Acc]
-    end, [], string:tokens(Original -- RootDir, "/")),
-    DelFileName = string:join(lists:reverse(Tokens), ":"),
+    Parts = split_filename(Original, RootDir),
+    DelFileName = string:join(Parts, ":"),
     DelFile = filename:join([RootDir,".delete", DelFileName]),
     Ending = io_lib:format("~6s", [couch_uuids:random()]),
     deleted_filename(DelFile, Ending).
+
+split_filename(FilePath, RootDir) ->
+    ["/" | Parts] = filename:split(FilePath -- RootDir),
+    split_filename(Parts).
+
+split_filename(["shards", Shard, "shards" | Rest]) ->
+    [Shard, "shards" | Rest -- ["mrview"]];
+split_filename(["shards", Shard, ".shards" | Rest]) ->
+    [Shard, ".shards" | Rest -- ["mrview"]];
+split_filename(["shards", Shard, "mrview" | Rest]) ->
+    [Shard, "mrview" | Rest -- ["mrview"]];
+split_filename(["shards", Shard | Rest]) ->
+    [Shard | Rest -- ["mrview"]];
+split_filename(Parts) ->
+    Parts -- ["mrview"].
 
 deleted_filename(Original, Ending) ->
     RootName = filename:rootname(Original),
@@ -660,6 +670,12 @@ process_info(Pid) ->
 
 deleted_filename_test_() ->
     [
+        should_create_proper_deleted_filename(simple_db, ""),
+        should_create_proper_deleted_filename(simple_view, ""),
+        should_create_proper_deleted_filename(simple_db, "eiri"),
+        should_create_proper_deleted_filename(simple_view, "eiri"),
+        should_create_proper_deleted_filename(simple_db, "complext/dbname"),
+        should_create_proper_deleted_filename(simple_view, "complext/dbname"),
         should_create_proper_deleted_filename(db, ""),
         should_create_proper_deleted_filename(view, ""),
         should_create_proper_deleted_filename(db, "eiri"),
@@ -680,20 +696,34 @@ should_create_proper_deleted_filename(FileType, Prepend) ->
         {ok, RootDir, FullPath, ExpectPartsCount}
             = make_filename_to_delete(FileType, Prepend),
         DelPath = deleted_filename(RootDir, FullPath, move),
-        DelParts = filename:split(filename:flatten(DelPath) -- RootDir),
-        DelDir = lists:nth(2, DelParts),
-        DelFile = lists:nth(3, DelParts),
+        RelPath = filename:flatten(DelPath) -- RootDir,
+        ["/", DelDir, DelFile] = filename:split(RelPath),
         DelFilePartsCount = length(string:tokens(DelFile, ":")),
         ?assertEqual(".delete", DelDir),
         ?assertEqual(ExpectPartsCount, DelFilePartsCount)
     end)}.
 
+make_filename_to_delete(simple_db, Prepend) ->
+    RootDir = "/srv/data/dbs",
+    FileName = "koi.1458336317.couch",
+    FullPath = filename:join([RootDir, Prepend, FileName]),
+    PrependParts = string:tokens(Prepend, "/"),
+    ExpectPartsCount = 1 + length(PrependParts),
+    {ok, RootDir, FullPath, ExpectPartsCount};
 make_filename_to_delete(db, Prepend) ->
     RootDir = "/srv/data/dbs",
     Shard = "00000000-1fffffff",
     FileName = "koi.1458336317.couch",
     FullPath = filename:join([RootDir, "shards", Shard,
         Prepend, FileName]),
+    PrependParts = string:tokens(Prepend, "/"),
+    ExpectPartsCount = 2 + length(PrependParts),
+    {ok, RootDir, FullPath, ExpectPartsCount};
+make_filename_to_delete(simple_view, Prepend) ->
+    RootDir = "/srv/data/views",
+    DDocName = "koi.1458336317_design",
+    FileName = "3133e28517e89a3e11435dd5ac4ad85a.view",
+    FullPath = filename:join([RootDir, Prepend, DDocName, "mrview", FileName]),
     PrependParts = string:tokens(Prepend, "/"),
     ExpectPartsCount = 2 + length(PrependParts),
     {ok, RootDir, FullPath, ExpectPartsCount};
