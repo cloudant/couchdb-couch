@@ -27,10 +27,12 @@
 -export([get_missing_revs/2,name/1,get_update_seq/1,get_committed_update_seq/1]).
 -export([get_uuid/1, get_epochs/1, get_compacted_seq/1]).
 -export([get_instance_start_time/1]).
--export([get_purge_seq/1,purge_docs/2,get_last_purged/1]).
+-export([get_purge_seq/1,purge_docs/2,get_oldest_purge_seq/1]).
+-export([get_purged_docs_limit/1, set_purged_docs_limit/2]).
 -export([start_link/4,open_doc_int/3,ensure_full_commit/1,ensure_full_commit/2]).
 -export([fold_docs/3, fold_docs/4]).
 -export([fold_changes/4, fold_changes/5, count_changes_since/2]).
+-export([fold_purged_docs/4, fold_purged_docs/5]).
 -export([set_security/2,get_security/1]).
 -export([read_doc/2,new_revid/1]).
 -export([check_is_admin/1, is_admin/1, check_is_member/1, get_doc_count/1]).
@@ -310,8 +312,46 @@ get_full_doc_info(Db, Id) ->
 get_full_doc_infos(Db, Ids) ->
     couch_db_engine:open_docs(Db, Ids).
 
-purge_docs(#db{main_pid=Pid}, IdsRevs) ->
-    gen_server:call(Pid, {purge_docs, IdsRevs}).
+
+-spec purge_docs(#db{}, [{Id, [Rev]}]) ->
+        {ok, {PurgeSeq, [Reply]}} | {error, purged_docs_limit_exceeded} when
+    Id       :: binary(),
+    Rev      :: {non_neg_integer(), binary()},
+    PurgeSeq :: non_neg_integer(),
+    Reply    :: {ok, []}
+              | {ok, [Rev]}
+              | {error, purge_during_compaction_exceeded_limit}.
+purge_docs(#db{main_pid=Pid}=Db, IdsRevs) ->
+    PDocsLimit = couch_db_engine:get(Db, purged_docs_limit),
+    if length(IdsRevs) > PDocsLimit ->
+        {error, purged_docs_limit_exceeded};
+    true ->
+        fold_purges(Pid, IdsRevs)
+    end.
+
+
+fold_purges(Pid, IdsRevs) ->
+    fold_purges(Pid, IdsRevs, {0,[]}).
+fold_purges(_Pid, [], {PSeq, Replies})->
+    {ok, {PSeq, lists:reverse(Replies)}};
+fold_purges(Pid, [IdRevs| RestIdsRevs], {PSeq0, Replies})->
+    case gen_server:call(Pid, {purge_docs, IdRevs}) of
+        {ok, {PSeq, PRevs}} ->
+            NewReplies = [{ok, PRevs} | Replies],
+            fold_purges(Pid, RestIdsRevs, {PSeq, NewReplies});
+        {error, purge_during_compaction_exceeded_limit} = Error ->
+            % fill the current and rest of replies with error
+            ErrorReplies = lists:duplicate(length(RestIdsRevs) + 1, Error),
+            {ok, {PSeq0, lists:reverse(Replies) ++ ErrorReplies}}
+    end.
+
+
+set_purged_docs_limit(#db{main_pid=Pid}=Db, Limit)
+        when is_integer(Limit), Limit > 0 ->
+    check_is_admin(Db),
+    gen_server:call(Pid, {set_purged_docs_limit, Limit}, infinity);
+set_purged_docs_limit(_Db, _Limit) ->
+    throw(invalid_purged_docs_limit).
 
 get_committed_update_seq(#db{committed_update_seq=Seq}) ->
     Seq.
@@ -326,10 +366,13 @@ get_update_seq(#db{} = Db)->
     couch_db_engine:get(Db, update_seq).
 
 get_purge_seq(#db{}=Db) ->
-    {ok, couch_db_engine:get(Db, purge_seq)}.
+    couch_db_engine:get(Db, purge_seq).
 
-get_last_purged(#db{}=Db) ->
-    {ok, couch_db_engine:get(Db, last_purged)}.
+get_oldest_purge_seq(#db{}=Db) ->
+    {ok, couch_db_engine:get(Db, oldest_purge_seq)}.
+
+get_purged_docs_limit(#db{}=Db) ->
+    couch_db_engine:get(Db, purged_docs_limit).
 
 get_doc_count(Db) ->
     {ok, couch_db_engine:get(Db, doc_count)}.
@@ -1253,6 +1296,15 @@ fold_changes(Db, StartSeq, UserFun, UserAcc, Opts) ->
 
 count_changes_since(Db, SinceSeq) ->
     couch_db_engine:count_changes_since(Db, SinceSeq).
+
+
+fold_purged_docs(Db, StartPurgeSeq, Fun, Acc) ->
+    fold_purged_docs(Db, StartPurgeSeq, Fun, Acc, []).
+
+
+fold_purged_docs(Db, StartPurgeSeq, UserFun, UserAcc, Opts) ->
+    couch_db_engine:fold_purged_docs(Db, StartPurgeSeq,
+            UserFun, UserAcc, Opts).
 
 
 %%% Internal function %%%

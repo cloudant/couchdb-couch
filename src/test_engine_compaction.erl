@@ -82,29 +82,22 @@ cet_compact_with_everything() ->
         {create, {<<"bar">>, [{<<"hooray">>, <<"purple">>}]}},
         {conflict, {<<"bar">>, [{<<"booo">>, false}]}}
     ],
-
     {ok, St6} = test_engine_util:apply_actions(Engine, St5, Actions2),
 
     [FooFDI, BarFDI] = Engine:open_docs(St6, [<<"foo">>, <<"bar">>]),
-
     FooRev = test_engine_util:prev_rev(FooFDI),
     BarRev = test_engine_util:prev_rev(BarFDI),
-
     Actions3 = [
-        {batch, [
-            {purge, {<<"foo">>, FooRev#rev_info.rev}},
-            {purge, {<<"bar">>, BarRev#rev_info.rev}}
-        ]}
+        {purge, {<<"foo">>, FooRev#rev_info.rev}},
+        {purge, {<<"bar">>, BarRev#rev_info.rev}}
     ],
-
     {ok, St7} = test_engine_util:apply_actions(Engine, St6, Actions3),
-
+    {ok, PIdRevs7} = Engine:fold_purged_docs(St7, 0, fun fold_fun/3, [], []),
     PurgedIdRevs = [
-        {<<"bar">>, [BarRev#rev_info.rev]},
-        {<<"foo">>, [FooRev#rev_info.rev]}
+        {<<"foo">>, [FooRev#rev_info.rev]},
+        {<<"bar">>, [BarRev#rev_info.rev]}
     ],
-
-    ?assertEqual(PurgedIdRevs, lists:sort(Engine:get(St7, last_purged))),
+    ?assertEqual(PurgedIdRevs, lists:reverse(PIdRevs7)),
 
     [Att0, Att1, Att2, Att3, Att4] = test_engine_util:prep_atts(Engine, St7, [
             {<<"ohai.txt">>, crypto:rand_bytes(2048)},
@@ -134,9 +127,14 @@ cet_compact_with_everything() ->
     end),
 
     {ok, St11, undefined} = Engine:finish_compaction(St10, DbName, [], Term),
+    {ok, PIdRevs11} = Engine:fold_purged_docs(St11, 0, fun fold_fun/3, [], []),
+
+    ?assertEqual(PurgedIdRevs, lists:reverse(PIdRevs11)),
+
     Db2 = test_engine_util:db_as_term(Engine, St11),
     Diff = test_engine_util:term_diff(Db1, Db2),
     ?assertEqual(nodiff, Diff).
+
 
 
 cet_recompact_updates() ->
@@ -178,6 +176,98 @@ cet_recompact_updates() ->
     ?assertEqual(nodiff, Diff).
 
 
+cet_recompact_purge() ->
+    {ok, Engine, Path, St1} = test_engine_util:init_engine(dbpath),
+
+    Actions1 = [
+        {create, {<<"foo">>, []}},
+        {create, {<<"bar">>, []}},
+        {conflict, {<<"bar">>, [{<<"vsn">>, 2}]}},
+        {create, {<<"baz">>, []}}
+    ],
+
+    {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions1),
+    {ok, St3, DbName, _, Term} = test_engine_util:compact(Engine, St2, Path),
+
+    [BarFDI, BazFDI] = Engine:open_docs(St3, [<<"bar">>, <<"baz">>]),
+    BarRev = test_engine_util:prev_rev(BarFDI),
+    BazRev = test_engine_util:prev_rev(BazFDI),
+    Actions2 = [
+        {purge, {<<"bar">>, BarRev#rev_info.rev}},
+        {purge, {<<"baz">>, BazRev#rev_info.rev}}
+    ],
+    {ok, St4} = test_engine_util:apply_actions(Engine, St3, Actions2),
+    Db1 = test_engine_util:db_as_term(Engine, St4),
+
+    {ok, St5, NewPid} = Engine:finish_compaction(St4, DbName, [], Term),
+
+    ?assertEqual(true, is_pid(NewPid)),
+    Ref = erlang:monitor(process, NewPid),
+
+    NewTerm = receive
+        {'$gen_cast', {compact_done, Engine, Term0}} ->
+            Term0;
+        {'DOWN', Ref, _, _, Reason} ->
+            erlang:error({compactor_died, Reason})
+        after 10000 ->
+            erlang:error(compactor_timed_out)
+    end,
+
+    {ok, St6, undefined} = Engine:finish_compaction(St5, DbName, [], NewTerm),
+    Db2 = test_engine_util:db_as_term(Engine, St6),
+
+    Diff = test_engine_util:term_diff(Db1, Db2),
+    ?assertEqual(nodiff, Diff).
+
+
+cet_recompact_purged_docs_limit() ->
+    {ok, Engine, Path, St0} = test_engine_util:init_engine(dbpath),
+    {ok, St1} = Engine:set(St0, purged_docs_limit, 2),
+
+    Actions1 = [
+        {create, {<<"foo">>, []}},
+        {create, {<<"bar">>, []}},
+        {conflict, {<<"bar">>, [{<<"vsn">>, 2}]}},
+        {create, {<<"baz">>, []}}
+    ],
+    {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions1),
+    {ok, St3, DbName, _, Term} = test_engine_util:compact(Engine, St2, Path),
+
+    % purging docs that exceeds purged_docs_limit before compaction finishes
+    [FooFDI, BarFDI, BazFDI] = Engine:open_docs(St3, [<<"foo">>, <<"bar">>, <<"baz">>]),
+    FooRev = test_engine_util:prev_rev(FooFDI),
+    BarRev = test_engine_util:prev_rev(BarFDI),
+    BazRev = test_engine_util:prev_rev(BazFDI),
+    Actions2 = [
+        {purge, {<<"foo">>, FooRev#rev_info.rev}},
+        {purge, {<<"bar">>, BarRev#rev_info.rev}},
+        {purge, {<<"baz">>, BazRev#rev_info.rev}}
+    ],
+    {ok, St4} = test_engine_util:apply_actions(Engine, St3, Actions2),
+    Db1 = test_engine_util:db_as_term(Engine, St4),
+
+    % Since purging a document will change the update_seq,
+    % finish_compaction will restart compaction in order to process
+    % the new updates
+    {ok, St5, CPid1} = Engine:finish_compaction(St4, DbName, [], Term),
+    ?assertEqual(true, is_pid(CPid1)),
+    Ref = erlang:monitor(process, CPid1),
+    NewTerm = receive
+        {'$gen_cast', {compact_done, Engine, Term0}} ->
+            Term0;
+        {'DOWN', Ref, _, _, Reason} ->
+            erlang:error({compactor_died, Reason})
+        after 10000 ->
+            erlang:error(compactor_timed_out)
+    end,
+
+    {ok, St6, undefined} = Engine:finish_compaction(St5, DbName, [], NewTerm),
+    Db2 = test_engine_util:db_as_term(Engine, St6),
+
+    Diff = test_engine_util:term_diff(Db1, Db2),
+    ?assertEqual(nodiff, Diff).
+
+
 docid(I) ->
     Str = io_lib:format("~4..0b", [I]),
     iolist_to_binary(Str).
@@ -186,3 +276,7 @@ docid(I) ->
 local_docid(I) ->
     Str = io_lib:format("_local/~4..0b", [I]),
     iolist_to_binary(Str).
+
+
+fold_fun(_PurgeSeq, {Id, Revs}, Acc) ->
+    {ok, [{Id, Revs} | Acc]}.

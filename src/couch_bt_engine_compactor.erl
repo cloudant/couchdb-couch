@@ -54,8 +54,7 @@ start(#st{} = St, DbName, Options, Parent) ->
     % and hope everything works out for the best.
     unlink(DFd),
 
-    NewSt1 = copy_purge_info(St, NewSt),
-    NewSt2 = copy_compact(DbName, St, NewSt1, Retry),
+    NewSt2 = copy_compact(DbName, St, NewSt, Retry),
     NewSt3 = sort_meta_data(NewSt2),
     NewSt4 = commit_compaction_data(NewSt3),
     NewSt5 = copy_meta_data(NewSt4),
@@ -72,7 +71,9 @@ open_compaction_files(SrcHdr, DbFilePath, Options) ->
     MetaFile = DbFilePath ++ ".compact.meta",
     {ok, DataFd, DataHdr} = open_compaction_file(DataFile),
     {ok, MetaFd, MetaHdr} = open_compaction_file(MetaFile),
+
     DataHdrIsDbHdr = couch_bt_engine_header:is_header(DataHdr),
+
     case {DataHdr, MetaHdr} of
         {#comp_header{}=A, #comp_header{}=A} ->
             DbHeader = A#comp_header.db_header,
@@ -94,25 +95,6 @@ open_compaction_files(SrcHdr, DbFilePath, Options) ->
             St0 = couch_bt_engine:init_state(DataFile, DataFd, Header, Options),
             St1 = bind_emsort(St0, MetaFd, nil),
             {ok, St1, DataFile, DataFd, MetaFd, nil}
-    end.
-
-
-copy_purge_info(OldSt, NewSt) ->
-    OldHdr = OldSt#st.header,
-    NewHdr = NewSt#st.header,
-    OldPurgeSeq = couch_bt_engine_header:purge_seq(OldHdr),
-    case OldPurgeSeq > 0 of
-        true ->
-            Purged = couch_bt_engine:get(OldSt, last_purged),
-            Opts = [{compression, NewSt#st.compression}],
-            {ok, Ptr, _} = couch_file:append_term(NewSt#st.fd, Purged, Opts),
-            NewNewHdr = couch_bt_engine_header:set(NewHdr, [
-                {purge_seq, OldPurgeSeq},
-                {purged_docs, Ptr}
-            ]),
-            NewSt#st{header = NewNewHdr};
-        false ->
-            NewSt
     end.
 
 

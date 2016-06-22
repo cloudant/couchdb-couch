@@ -24,6 +24,7 @@
     test_engine_attachments,
     test_engine_fold_docs,
     test_engine_fold_changes,
+    test_engine_fold_purged_docs,
     test_engine_purge_docs,
     test_engine_compaction,
     test_engine_ref_counting
@@ -129,28 +130,33 @@ apply_action(Engine, St, Action) ->
     apply_batch(Engine, St, [Action]).
 
 
+apply_batch(Engine, St, [{purge, {Id, Revs}}]) ->
+    UpdateSeq = Engine:get(St, update_seq) + 1,
+    case gen_write(Engine, St, {purge, {Id, Revs}}, UpdateSeq) of
+        {_, _, purged_before}->
+            St;
+        {Pair, _, PurgedIdRevs} ->
+            {ok, NewSt} = Engine:purge_doc_revs(St, Pair, PurgedIdRevs),
+            NewSt
+    end;
+
 apply_batch(Engine, St, Actions) ->
     UpdateSeq = Engine:get(St, update_seq) + 1,
-    AccIn = {UpdateSeq, [], [], []},
+    AccIn = {UpdateSeq, [], []},
     AccOut = lists:foldl(fun(Action, Acc) ->
-        {SeqAcc, DocAcc, LDocAcc, PurgeAcc} = Acc,
+        {SeqAcc, DocAcc, LDocAcc} = Acc,
         case Action of
             {_, {<<"_local/", _/binary>>, _}} ->
                 LDoc = gen_local_write(Engine, St, Action),
-                {SeqAcc, DocAcc, [LDoc | LDocAcc], PurgeAcc};
+                {SeqAcc, DocAcc, [LDoc | LDocAcc]};
             _ ->
-                case gen_write(Engine, St, Action, SeqAcc) of
-                    {_OldFDI, _NewFDI} = Pair ->
-                        {SeqAcc + 1, [Pair | DocAcc], LDocAcc, PurgeAcc};
-                    {Pair, NewSeqAcc, NewPurgeInfo} ->
-                        NewPurgeAcc = [NewPurgeInfo | PurgeAcc],
-                        {NewSeqAcc, [Pair | DocAcc], LDocAcc, NewPurgeAcc}
-                end
+                {OldFDI, NewFDI} = gen_write(Engine, St, Action, SeqAcc),
+                {SeqAcc + 1, [{OldFDI, NewFDI} | DocAcc], LDocAcc}
         end
     end, AccIn, Actions),
-    {_, Docs0, LDocs, PurgeIdRevs} = AccOut,
+    {_, Docs0, LDocs} = AccOut,
     Docs = lists:reverse(Docs0),
-    {ok, NewSt} = Engine:write_doc_infos(St, Docs, LDocs, PurgeIdRevs),
+    {ok, NewSt} = Engine:write_doc_infos(St, Docs, LDocs),
     NewSt.
 
 
@@ -218,39 +224,70 @@ gen_write(Engine, St, {create, {DocId, Body, Atts0}}, UpdateSeq) ->
     }};
 
 gen_write(Engine, St, {purge, {DocId, PrevRevs0, _}}, UpdateSeq) ->
-    [#full_doc_info{} = PrevFDI] = Engine:open_docs(St, [DocId]),
-    PrevRevs = if is_list(PrevRevs0) -> PrevRevs0; true -> [PrevRevs0] end,
+    case Engine:open_docs(St, [DocId]) of
+    [not_found] ->
+        % Check if this doc has been purged before
+        FoldFun = fun(_PurgeSeq, {Id, _Revs}, _Acc) ->
+            case Id of
+                DocId -> {ok, true};
+                _ -> {ok, false}
+            end
+                  end,
+        {ok, IsPurgedBefore} = Engine:fold_purged_docs(St, 0, FoldFun, false, []),
+        case IsPurgedBefore of
+            true -> {{}, UpdateSeq, purged_before};
+            false -> erlang:error({invalid_purge_test_id, DocId})
+        end;
+    [#full_doc_info{} = PrevFDI] ->
+        PrevRevs = if is_list(PrevRevs0) -> PrevRevs0; true -> [PrevRevs0] end,
 
-    #full_doc_info{
-        rev_tree = PrevTree
-    } = PrevFDI,
+        #full_doc_info{
+            rev_tree = PrevTree
+        } = PrevFDI,
 
-    {NewTree, RemRevs} = couch_key_tree:remove_leafs(PrevTree, PrevRevs),
-    RemovedAll = lists:sort(RemRevs) == lists:sort(PrevRevs),
-    if RemovedAll -> ok; true ->
-        % If we didn't purge all the requested revisions
-        % then its a bug in the test.
-        erlang:error({invalid_purge_test_revs, PrevRevs})
-    end,
+        {NewTree, RemRevs0} = couch_key_tree:remove_leafs(PrevTree, PrevRevs),
+        {RemRevs, NotRemRevs} = lists:partition(fun(R) ->
+                lists:member(R, RemRevs0) end, PrevRevs),
 
-    case NewTree of
-        [] ->
-            % We've completely purged the document
-            {{PrevFDI, not_found}, UpdateSeq, {DocId, RemRevs}};
-        _ ->
-            % We have to relabel the update_seq of all
-            % leaves. See couch_db_updater for details.
-            {NewNewTree, NewUpdateSeq} = couch_key_tree:mapfold(fun
-                (_RevId, Leaf, leaf, InnerSeqAcc) ->
-                    {Leaf#leaf{seq = InnerSeqAcc}, InnerSeqAcc + 1};
-                (_RevId, Value, _Type, InnerSeqAcc) ->
-                    {Value, InnerSeqAcc}
-            end, UpdateSeq, NewTree),
-            NewFDI = PrevFDI#full_doc_info{
-                update_seq = NewUpdateSeq - 1,
-                rev_tree = NewNewTree
-            },
-            {{PrevFDI, NewFDI}, NewUpdateSeq, {DocId, RemRevs}}
+        if NotRemRevs == [] -> ok; true ->
+            % Check if these Revs have been purged before
+            FoldFun = fun(_PurgeSeq, {Id, Revs}, Acc) ->
+                case Id of
+                    DocId -> {ok, Acc ++ Revs};
+                    _ -> {ok, Acc}
+                end
+            end,
+            {ok, PurgedRevs} = Engine:fold_purged_docs(St, 0, FoldFun, [], []),
+            case lists:subtract(PrevRevs, PurgedRevs) of [] -> ok; true ->
+                % If we didn't purge all the requested revisions
+                % and they haven't been purged before
+                % then its a bug in the test.
+                erlang:error({invalid_purge_test_revs, PrevRevs})
+            end
+        end,
+
+        case {RemRevs, NewTree} of
+            {[], _} ->
+                {{PrevFDI, PrevFDI}, UpdateSeq, purged_before};
+            {_, []} ->
+                % We've completely purged the document
+                {{PrevFDI, not_found}, UpdateSeq, {DocId, RemRevs}};
+            _ ->
+                % We have to relabel the update_seq of all
+                % leaves. See couch_db_updater for details.
+                {NewNewTree, NewUpdateSeq} = couch_key_tree:mapfold(fun
+                    (_RevId, Leaf, leaf, InnerSeqAcc) ->
+                        {Leaf#leaf{seq = InnerSeqAcc}, InnerSeqAcc + 1};
+                    (_RevId, Value, _Type, InnerSeqAcc) ->
+                        {Value, InnerSeqAcc}
+                end, UpdateSeq, NewTree),
+                NewFDI = PrevFDI#full_doc_info{
+                    update_seq = NewUpdateSeq - 1,
+                    rev_tree = NewNewTree
+                },
+                {{PrevFDI, NewFDI}, NewUpdateSeq, {DocId, RemRevs}}
+
+        end
     end;
 
 gen_write(Engine, St, {Action, {DocId, Body, Atts0}}, UpdateSeq) ->
@@ -403,7 +440,8 @@ db_as_term(Engine, St) ->
         {props, db_props_as_term(Engine, St)},
         {docs, db_docs_as_term(Engine, St)},
         {local_docs, db_local_docs_as_term(Engine, St)},
-        {changes, db_changes_as_term(Engine, St)}
+        {changes, db_changes_as_term(Engine, St)},
+        {purged_docs, db_purged_docs_as_term(Engine, St)}
     ].
 
 
@@ -414,7 +452,6 @@ db_props_as_term(Engine, St) ->
         disk_version,
         update_seq,
         purge_seq,
-        last_purged,
         security,
         revs_limit,
         uuid,
@@ -445,6 +482,15 @@ db_changes_as_term(Engine, St) ->
     lists:reverse(lists:map(fun(FDI) ->
         fdi_to_term(Engine, St, FDI)
     end, Changes)).
+
+
+db_purged_docs_as_term(Engine, St) ->
+    StartPSeq = Engine:get(St, oldest_purge_seq) - 1,
+    FoldFun = fun(PurgeSeq, {Id, Revs}, Acc) ->
+            {ok, [{PurgeSeq, Id, Revs} | Acc]} end,
+    {ok, PurgedSeqDocs} = Engine:fold_purged_docs(St, StartPSeq,
+            FoldFun, [], []),
+    lists:reverse(PurgedSeqDocs).
 
 
 fdi_to_term(Engine, St, FDI) ->

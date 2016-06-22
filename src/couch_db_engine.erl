@@ -52,6 +52,10 @@
         % Need to enumerate these
     ].
 
+-type purge_fold_options() :: [
+        % Need to enumerate these
+    ].
+
 -type db_handle() :: any().
 
 -type doc_fold_fun() :: fun((#full_doc_info{}, UserAcc::any()) ->
@@ -65,6 +69,11 @@
 -type changes_fold_fun() :: fun((#doc_info{}, UserAcc::any()) ->
         {ok, NewUserAcc::any()} |
         {stop, NewUserAcc::any()}).
+
+-type purge_fold_fun() :: fun((PurgeSeq::non_neg_integer(),
+        {Id::docid(), Revs::revs()}, UserAcc::any()) ->
+    {ok, NewUserAcc::any()} |
+    {stop, NewUserAcc::any()}).
 
 
 % This is called by couch_server to determine which
@@ -241,30 +250,19 @@
 % #full_doc_info{} records. The first element of the pair is
 % the #full_doc_info{} that exists on disk. The second element
 % is the new version that should be written to disk. There are
-% three basic cases that should be followed:
+% two basic cases that should be considered:
 %
 %     1. {not_found, #full_doc_info{}} - A new document was created
 %     2. {#full_doc_info{}, #full_doc_info{}} - A document was updated
-%     3. {#full_doc_info{}, not_found} - A document was purged completely
 %
-% Number one and two are fairly straight forward as long as proper
-% accounting for moving entries in the udpate sequence are accounted
-% for. However, case 3 you'll notice is "purged completely" which
-% means it needs to be removed from the database including the
-% update sequence. Also, for engines that are not using append
-% only storage like the legacy engine, case 2 can be the result of
-% a purge so special care will be needed to see which revisions
-% should be removed.
+% The cases are fairly straight forward as long as proper
+% accounting for moving entries in the update sequence are accounted
+% for.
 %
 % The LocalDocs variable is applied separately. Its important to
 % note for new storage engine authors that these documents are
 % separate because they should *not* be included as part of the
 % changes index for the database.
-%
-% The PurgedDocIdRevs is the list of Ids and Revisions that were
-% purged during this update. While its not guaranteed by the API,
-% currently there will never be purge changes comingled with
-% standard updates.
 %
 % Traditionally an invocation of write_doc_infos should be all
 % or nothing in so much that if an error occurs (or the VM dies)
@@ -276,8 +274,35 @@
 -callback write_doc_infos(
     DbHandle::db_handle(),
     Pairs::doc_pairs(),
-    LocalDocs::[#doc{}],
-    PurgedDocIdRevs::[{docid(), revs()}]) ->
+    LocalDocs::[#doc{}]) ->
+        {ok, NewDbHandle::db_handle()}.
+
+
+% This function is called from the context of couch_db_updater
+% and as such is guaranteed single threaded for the given
+% DbHandle.
+%
+% The Pair argument is a tuple of full_doc_info{} records.
+% The first element of the pair is the #full_doc_info{} that exists
+% on disk. The second element is the new version that should be written
+% to disk. There are two basic cases that should be considered:
+%
+%     1. {#full_doc_info{}, #full_doc_info{}} - A document was partially purged
+%     2. {#full_doc_info{}, not_found} - A document was completely purged
+%
+% In case 1, non-tail-append engines may have to remove revisions
+% specifically rather than rely on compaction to remove them.
+%
+% In case 2 you'll notice is "purged completely" which
+% means it needs to be removed from the database including the
+% update sequence.
+%
+% The PurgedDocIdRevs is the tuple of Id and Revisions that were
+% purged during this update.
+-callback purge_doc_revs(
+    DbHandle::db_handle(),
+    Pair::doc_pair(),
+    PurgedDocIdRevs::{docid(), revs()}) ->
         {ok, NewDbHandle::db_handle()}.
 
 
@@ -345,7 +370,7 @@
 %        when rev, start_key should be greater than end_key if the
 %        user wishes to see results)
 %     5. include_reductions - This is a hack for _all_docs since
-%        it currently relies on reductiosn to count an offset. This
+%        it currently relies on reductions to count an offset. This
 %        is a terrible hack that will need to be addressed by the
 %        API in the future. If this option is present the supplied
 %        user function expects three arguments, where the first
@@ -392,12 +417,12 @@
 % This function is called to fold over the documents (not local
 % documents) in order of their most recent update. Each document
 % in the database should have exactly one entry in this sequence.
-% If a document is updated during a call to this funciton it should
+% If a document is updated during a call to this function it should
 % not be included twice as that will probably lead to Very Bad Things.
 %
 % This should behave similarly to fold_docs/4 in that the supplied
 % user function should be invoked with a #full_doc_info{} record
-% as the first arugment and the current user accumulator as the
+% as the first argument and the current user accumulator as the
 % second argument. The same semantics for the return value from the
 % user function should be handled as in fold_docs/4.
 %
@@ -413,6 +438,25 @@
     UserFold::changes_fold_fun(),
     UserAcc::any(),
     changes_fold_options()) ->
+        {ok, LastUserAcc::any()}.
+
+
+% This function may be called by many processes concurrently.
+%
+% This function is called to fold over purged documents in order of
+% their most recent purge.
+%
+% This should behave similarly to fold_changes/5 except with no
+% option for iterating in reverse.
+%
+% The StartPurgeSeq parameter indicates where the fold should start
+% *after*.
+-callback fold_purged_docs(
+    DbHandle::db_handle(),
+    StartPurgeSeq::non_neg_integer(),
+    UserFold::purge_fold_fun(),
+    UserAcc::any(),
+    purge_fold_options()) ->
         {ok, LastUserAcc::any()}.
 
 
@@ -499,7 +543,8 @@
 
     serialize_doc/2,
     write_doc_body/2,
-    write_doc_infos/4,
+    write_doc_infos/3,
+    purge_doc_revs/3,
     commit_data/1,
 
     open_write_stream/2,
@@ -509,6 +554,7 @@
     fold_docs/4,
     fold_local_docs/4,
     fold_changes/5,
+    fold_purged_docs/5,
     count_changes_since/2,
 
     start_compaction/1,
@@ -634,10 +680,17 @@ write_doc_body(#db{} = Db, #doc{} = Doc) ->
     Engine:write_doc_body(EngineState, Doc).
 
 
-write_doc_infos(#db{} = Db, DocUpdates, LocalDocs, PurgedDocIdRevs) ->
+write_doc_infos(#db{} = Db, DocUpdates, LocalDocs) ->
     #db{engine = {Engine, EngineState}} = Db,
     {ok, NewSt} = Engine:write_doc_infos(
-            EngineState, DocUpdates, LocalDocs, PurgedDocIdRevs),
+            EngineState, DocUpdates, LocalDocs),
+    {ok, Db#db{engine = {Engine, NewSt}}}.
+
+
+purge_doc_revs(#db{} = Db, DocUpdates, PurgedDocIdRevs) ->
+    #db{engine = {Engine, EngineState}} = Db,
+    {ok, NewSt} = Engine:purge_doc_revs(
+        EngineState, DocUpdates, PurgedDocIdRevs),
     {ok, Db#db{engine = {Engine, NewSt}}}.
 
 
@@ -675,6 +728,11 @@ fold_local_docs(#db{} = Db, UserFun, UserAcc, Options) ->
 fold_changes(#db{} = Db, StartSeq, UserFun, UserAcc, Options) ->
     #db{engine = {Engine, EngineState}} = Db,
     Engine:fold_changes(EngineState, StartSeq, UserFun, UserAcc, Options).
+
+
+fold_purged_docs(#db{} = Db, StartPurgeSeq, UserFun, UserAcc, Options) ->
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:fold_purged_docs(EngineState, StartPurgeSeq, UserFun, UserAcc, Options).
 
 
 count_changes_since(#db{} = Db, StartSeq) ->
