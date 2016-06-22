@@ -67,7 +67,7 @@ stem/2
 
 -include_lib("couch/include/couch_db.hrl").
 -type treenode() :: {Key::term(), Value::term(), [Node::treenode()]}.
--type tree() :: {Depth::pos_integer(), [treenode()]}.
+-type tree() :: {Depth::pos_integer(), treenode()}.
 -type revtree() :: [tree()].
 
 
@@ -244,7 +244,10 @@ filter_leafs([{Pos, [{LeafKey, _}|_]} = Path |Rest], Keys, FilteredAcc, RemovedK
         filter_leafs(Rest, FilteredKeys, FilteredAcc, [{Pos, LeafKey} | RemovedKeysAcc])
     end.
 
-% Removes any branches from the tree whose leaf node(s) are in the Keys
+
+%% @doc Removes any branches from the tree whose leaf node(s) are in the Keys
+-spec remove_leafs(revtree(), [term()]) ->
+    {revtree(), [{pos_integer(), term()}]}.
 remove_leafs(Trees, Keys) ->
     % flatten each branch in a tree into a tree path
     Paths = get_all_leafs_full(Trees),
