@@ -17,6 +17,7 @@
 -export([
     handle_db_changes/3,
     handle_changes/4,
+    handle_changes/3,
     get_changes_timeout/2,
     wait_updated/3,
     get_rest_updated/1,
@@ -57,16 +58,24 @@
 handle_db_changes(Args, Req, Db) ->
     handle_changes(Args, Req, Db, db).
 
-handle_changes(Args1, Req, Db0, Type) ->
+
+handle_changes(Args1, Req, Db, Type) ->
     #changes_args{
         style = Style,
-        filter = FilterName,
+        filter = FilterName
+    } = Args1,
+    Filter = configure_filter(FilterName, Style, Req, Db),
+    Args = Args1#changes_args{filter_fun = Filter},
+    handle_changes(Args, Db, Type).
+
+
+handle_changes(Args, Db0, Type) ->
+    #changes_args{
         feed = Feed,
         dir = Dir,
-        since = Since
-    } = Args1,
-    Filter = configure_filter(FilterName, Style, Req, Db0),
-    Args = Args1#changes_args{filter_fun = Filter},
+        since = Since,
+        filter_fun = Filter
+    } = Args,
     % The type of changes feed depends on the supplied filter. If the query is
     % for an optimized view-filtered db changes, we need to use the view
     % sequence tree.
