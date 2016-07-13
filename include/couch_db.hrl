@@ -97,6 +97,7 @@
     authentication_handlers = [],
     absolute_uri,
     auth_module,
+    api_module,
     begin_ts,
     original_method,
     nonce,
