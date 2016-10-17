@@ -71,9 +71,9 @@ insert(DbName, Lru) ->
         {undefined, undefined} ->
             {Ref, Ref};
         {_, _} when is_reference(Head), is_reference(Tail) ->
-            set_next(Lru, Tail, Node),
-            set_prev(Lru, Node, Tail),
-            {Head, Node}
+            set_next(Lru, Tail, Ref),
+            set_prev(Lru, Ref, Tail),
+            {Head, Ref}
     end,
     Lru#lru{
         head = NewHead,
