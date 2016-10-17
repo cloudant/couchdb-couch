@@ -202,12 +202,12 @@ close(Lru, Ref) ->
                         couch_server,
                         lru_skip
                     ]),
-                    NewLru = update(DbName, Lru),
-                    close(NewLru, Next)
+                    NewLru = close(Lru, Next),
+                    update(DbName, NewLru)
             end;
         false ->
-            remove_ref(Lru, Ref),
-            close(Lru, Next)
+            NewLru = close(Lru, Next),
+            remove_ref(NewLru, Ref)
     end.
 
 
