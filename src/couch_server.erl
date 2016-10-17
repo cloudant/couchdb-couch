@@ -292,7 +292,7 @@ maybe_close_lru_db(#server{dbs_open=NumOpen, max_dbs_open=MaxOpen}=Server)
     {ok, Server};
 maybe_close_lru_db(Server) ->
     try
-        {ok, db_closed(lru_close(Server)), [])}
+        {ok, db_closed(lru_close(Server), [])}
     catch error:all_dbs_active ->
         {error, all_dbs_active}
     end.
@@ -505,7 +505,7 @@ handle_call({db_updated, #db{}=Db}, _From, Server0) ->
     end,
     {reply, ok, Server}.
 
-handle_cast({update_lru, DbName}, #server{lru = Lru, update_lru_on_read=true} = Server) ->
+handle_cast({update_lru, DbName}, #server{update_lru_on_read=true} = Server) ->
     {noreply, lru_update(Server, DbName)};
 handle_cast({update_lru, _DbName}, Server) ->
     {noreply, Server};
