@@ -23,7 +23,8 @@
 % Debugging
 -export([
     to_list/1,
-    validate/1
+    validate/1,
+    debug/1
 ]).
 
 -include_lib("couch/include/couch_db.hrl").
@@ -155,6 +156,21 @@ validate(Lru) ->
     catch _:_ ->
         false
     end.
+
+
+debug(Lru) ->
+    #lru{
+        dbs = Dbs,
+        nodes = Nodes,
+        head = Head,
+        tail = Tail
+    } = Lru,
+    [
+        {dbs, khash:to_list(Dbs)},
+        {nodes, khash:to_list(Nodes)},
+        {head, Head},
+        {tail, Tail}
+    ].
 
 
 close(_, undefined) ->
