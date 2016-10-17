@@ -333,6 +333,12 @@ handle_call({set_max_dbs_open, Max}, _From, Server) ->
     {reply, ok, Server#server{max_dbs_open=Max}};
 handle_call(get_server, _From, Server) ->
     {reply, {ok, Server}, Server};
+handle_call(lru_to_list, _From, #server{lru = Lru} = Server) ->
+    {reply, couch_lru:to_list(Lru), Server};
+handle_call(lru_validate, _From, #server{lru = Lru} = Server) ->
+    {reply, couch_lru:validate(Lru), Server};
+handle_call(lru_debug, _From, #server{lru = Lru} = Server) ->
+    {reply, couch_lru:debug(Lru), Server};
 handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     link(Db#db.main_pid),
     true = ets:delete(couch_dbs_pid_to_name, FromPid),
