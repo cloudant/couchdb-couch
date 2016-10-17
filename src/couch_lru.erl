@@ -222,6 +222,9 @@ to_list(Lru, Ref) ->
     [DbName | to_list(Lru, Next)].
 
 
+validate(_Lru, undefined) ->
+    ok;
+
 validate(Lru, Ref) ->
     #lru{
         dbs = Dbs,
