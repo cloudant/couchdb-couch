@@ -64,22 +64,26 @@ insert(DbName, Lru) ->
     Node = #node{
         dbname = DbName
     },
-    Ref = erlang:make_ref(),
-    not_found = khash:lookup(Dbs, DbName),
-    ok = khash:put(Dbs, DbName, Ref),
-    ok = khash:put(Nodes, Ref, Node),
-    {NewHead, NewTail} = case {Head, Tail} of
-        {undefined, undefined} ->
-            {Ref, Ref};
-        {_, _} when is_reference(Head), is_reference(Tail) ->
-            set_next(Lru, Tail, Ref),
-            set_prev(Lru, Ref, Tail),
-            {Head, Ref}
-    end,
-    Lru#lru{
-        head = NewHead,
-        tail = NewTail
-    }.
+    case khash:lookup(Dbs, DbName) of
+        {value, Ref} when is_reference(Ref) ->
+            update(DbName, Lru);
+        not_found ->
+            Ref = erlang:make_ref(),
+            ok = khash:put(Dbs, DbName, Ref),
+            ok = khash:put(Nodes, Ref, Node),
+            {NewHead, NewTail} = case {Head, Tail} of
+                {undefined, undefined} ->
+                    {Ref, Ref};
+                {_, _} when is_reference(Head), is_reference(Tail) ->
+                    set_next(Lru, Tail, Ref),
+                    set_prev(Lru, Ref, Tail),
+                    {Head, Ref}
+            end,
+            Lru#lru{
+                head = NewHead,
+                tail = NewTail
+            }
+    end.
 
 
 update(DbName, Lru) ->
