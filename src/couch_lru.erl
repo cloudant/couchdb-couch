@@ -153,8 +153,9 @@ validate(Lru) ->
                 validate(Lru, H)
         end,
         true
-    catch _:_ ->
-        false
+    catch Type:Reason ->
+        Stack = erlang:get_stacktrace(),
+        {false, {Type, Reason, Stack}}
     end.
 
 
