@@ -36,7 +36,8 @@
     dbs_open=0,
     start_time="",
     update_lru_on_read=true,
-    lru = couch_lru:new()
+    lru,
+    lru_mod = couch_lru
     }).
 
 dev_start() ->
@@ -191,10 +192,18 @@ init([]) ->
     ets:new(couch_dbs, [set, protected, named_table, {keypos, #db.name}]),
     ets:new(couch_dbs_pid_to_name, [set, protected, named_table]),
     process_flag(trap_exit, true),
+    LruMod = case config:get("couchdb", "lru_mod", "couch_lru") of
+        "couch_lru2" ->
+            couch_lru2;
+        _ ->
+            couch_lru
+    end,
     {ok, #server{root_dir=RootDir,
                 max_dbs_open=MaxDbsOpen,
                 update_lru_on_read=UpdateLruOnRead,
-                start_time=couch_util:rfc1123_date()}}.
+                start_time=couch_util:rfc1123_date(),
+                lru = LruMod:new(),
+                lru_mod = LruMod}}.
 
 terminate(Reason, Srv) ->
     couch_log:error("couch_server terminating with ~p, state ~2048p",
@@ -281,9 +290,9 @@ make_room(Server, Options) ->
 maybe_close_lru_db(#server{dbs_open=NumOpen, max_dbs_open=MaxOpen}=Server)
         when NumOpen < MaxOpen ->
     {ok, Server};
-maybe_close_lru_db(#server{lru=Lru}=Server) ->
+maybe_close_lru_db(Server) ->
     try
-        {ok, db_closed(Server#server{lru = couch_lru:close(Lru)}, [])}
+        {ok, db_closed(lru_close(Server)), [])}
     catch error:all_dbs_active ->
         {error, all_dbs_active}
     end.
@@ -319,9 +328,9 @@ open_async(Server, From, DbName, Filepath, Options) ->
     true = ets:insert(couch_dbs_pid_to_name, {Opener, DbName}),
     db_opened(Server, Options).
 
-handle_call(close_lru, _From, #server{lru=Lru} = Server) ->
+handle_call(close_lru, _From, #server{} = Server) ->
     try
-        {reply, ok, db_closed(Server#server{lru = couch_lru:close(Lru)}, [])}
+        {reply, ok, db_closed(Server, [])}
     catch error:all_dbs_active ->
         {reply, {error, all_dbs_active}, Server}
     end;
@@ -357,13 +366,12 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     end,
     true = ets:insert(couch_dbs, Db),
     true = ets:insert(couch_dbs_pid_to_name, {Db#db.main_pid, DbName}),
-    Lru = case couch_db:is_system_db(Db) of
+    case couch_db:is_system_db(Db) of
         false ->
-            couch_lru:insert(DbName, Server#server.lru);
+            {reply, ok, lru_insert(Server, DbName)};
         true ->
-            Server#server.lru
-    end,
-    {reply, ok, Server#server{lru = Lru}};
+            {reply, ok, Server}
+    end;
 handle_call({open_result, T0, DbName, {error, eexist}}, From, Server) ->
     handle_call({open_result, T0, DbName, file_exists}, From, Server);
 handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
@@ -486,11 +494,10 @@ handle_call({db_updated, #db{}=Db}, _From, Server0) ->
     Server = try ets:lookup_element(couch_dbs, DbName, #db.instance_start_time) of
         StartTime ->
             true = ets:insert(couch_dbs, Db),
-            Lru = case couch_db:is_system_db(Db) of
-                false -> couch_lru:update(DbName, Server0#server.lru);
-                true -> Server0#server.lru
-            end,
-            Server0#server{lru = Lru};
+            case couch_db:is_system_db(Db) of
+                false -> lru_update(Server0, DbName);
+                true -> Server0
+            end;
         _ ->
             Server0
     catch _:_ ->
@@ -499,7 +506,7 @@ handle_call({db_updated, #db{}=Db}, _From, Server0) ->
     {reply, ok, Server}.
 
 handle_cast({update_lru, DbName}, #server{lru = Lru, update_lru_on_read=true} = Server) ->
-    {noreply, Server#server{lru = couch_lru:update(DbName, Lru)}};
+    {noreply, lru_update(Server, DbName)};
 handle_cast({update_lru, _DbName}, Server) ->
     {noreply, Server};
 handle_cast(Msg, Server) ->
@@ -549,6 +556,39 @@ db_closed(Server, Options) ->
         false -> Server#server{dbs_open=Server#server.dbs_open - 1};
         true -> Server
     end.
+
+
+lru_insert(Server, DbName) ->
+    #server{
+        lru = Lru,
+        lru_mod = LruMod
+    } = Server,
+    NewLru = LruMod:insert(DbName, Lru),
+    Server#server{
+        lru = NewLru
+    }.
+
+
+lru_update(Server, DbName) ->
+    #server{
+        lru = Lru,
+        lru_mod = LruMod
+    } = Server,
+    NewLru = LruMod:update(DbName, Lru),
+    Server#server{
+        lru = NewLru
+    }.
+
+
+lru_close(Server) ->
+    #server{
+        lru = Lru,
+        lru_mod = LruMod
+    } = Server,
+    NewLru = LruMod:close(Lru),
+    Server#server{
+        lru = NewLru
+    }.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
