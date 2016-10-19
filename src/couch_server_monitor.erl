@@ -59,12 +59,19 @@ terminate(_Reason, _St) ->
     ok.
 
 
+handle_call({decref, Client}, From, St) ->
+    {noreply, NewSt} = handle_cast({decref, Client}, St),
+    handle_call(is_idle, From, NewSt);
+
 handle_call(is_idle, _From, St) ->
     Reply = case khash:size(St#st.refs) of
         0 -> true;
         _ -> false
     end,
     {reply, Reply, St};
+
+handle_call(status, _From, St) ->
+    {reply, {khash:to_list(St#st.refs), St#st.is_sys_db}, St};
 
 handle_call(Msg, _From, St) ->
     {reply, {bad_call, Msg}, St}.
@@ -77,9 +84,15 @@ handle_cast({incref, Client}, St) ->
     {noreply, St};
 
 handle_cast({decref, Client}, St) ->
-    {value, [Ref | RestRefs]} = khash:lookup(St#st.refs, Client),
-    erlang:demonitor(Ref, [flush]),
-    maybe_remove_client(St, Client, RestRefs),
+    case khash:lookup(St#st.refs, Client) of
+        {value, [Ref | RestRefs]} ->
+            erlang:demonitor(Ref, [flush]),
+            maybe_remove_client(St, Client, RestRefs);
+        not_found ->
+            % We got the 'DOWN' message before couch_server
+            % told us that the client closed the db
+            ok
+    end,
     {noreply, St};
 
 handle_cast(stop, St) ->
@@ -102,7 +115,7 @@ code_change(_Vsn, St, _Extra) ->
 
 
 remove_ref(St, Client, Ref) ->
-    {value, ExistingRefs} = khash:get(St#st.refs, Client),
+    {value, ExistingRefs} = khash:lookup(St#st.refs, Client),
     RestRefs = ExistingRefs -- [Ref],
     true = RestRefs /= ExistingRefs,
     maybe_remove_client(St, Client, RestRefs).

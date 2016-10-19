@@ -289,6 +289,7 @@ maybe_close_idle_db(Server) ->
 
 
 close_idle_db() ->
+    {_, Stack} = process_info(self(), current_stacktrace),
     case ets:first(?IDLE) of
         DbName when is_binary(DbName) ->
             case close_idle_db(DbName) of
@@ -298,6 +299,7 @@ close_idle_db() ->
                     close_idle_db()
             end;
         '$end_of_table' ->
+            %dump_monitors(),
             erlang:error(all_dbs_active)
     end.
 
@@ -322,6 +324,19 @@ close_idle_db(DbName) ->
             true = ets:delete(?IDLE, DbName),
             not_closed
     end.
+
+
+%% dump_monitors() ->
+%%     MaxOpen = config:get("couchdb", "max_dbs_open", "default"),
+%%     CurrOpen = ets:info(?DBS, size),
+%%     io:format(standard_error, "Max: ~p, Curr: ~p~n", [MaxOpen, CurrOpen]),
+%%     io:format(standard_error, "Idle: ~p~n", [ets:tab2list(?IDLE)]),
+%%     lists:foreach(fun(#db{name = DbName} = Db) ->
+%%         [#mon{pid = Pid}] = ets:lookup(?MONITORS, DbName),
+%%         Idle = couch_db:is_idle(Db),
+%%         Status = gen_server:call(Pid, status),
+%%         io:format(standard_error, "Db: ~s, Idle: ~p, Monitor: ~p~n", [DbName, Idle, Status])
+%%     end, ets:tab2list(?DBS)).
 
 
 open_async(Server, From, DbName, Filepath, Options) ->
@@ -559,19 +574,31 @@ handle_cast({incref, DbName, Client}, Server) ->
     {noreply, Server};
 handle_cast({decref, DbName, Client}, Server) ->
     case ets:lookup(?MONITORS, DbName) of
-        [#mon{pid = Pid}] ->
-            gen_server:cast(Pid, {decref, Client});
+        [#mon{pid = Pid} = Mon] ->
+            case gen_server:call(Pid, {decref, Client}) of
+                true ->
+                    ets:insert(?IDLE, Mon);
+                false ->
+                    ok
+            end;
         [] ->
             ok
     end,
     {noreply, Server};
 handle_cast({idle, DbName, MonPid}, Server) ->
-    case gen_server:call(MonPid, get_ref_count) of
-        0 ->
-            ets:insert(?IDLE, #mon{name = DbName, pid = MonPid});
-        _ ->
-            % A client requested this database while the
-            % idle message was in flight so ignore.
+    case is_process_alive(MonPid) of
+        true ->
+            case gen_server:call(MonPid, is_idle) of
+                0 ->
+                    ets:insert(?IDLE, #mon{name = DbName, pid = MonPid});
+                _ ->
+                    % A client requested this database while the
+                    % idle message was in flight so ignore.
+                    ok
+            end;
+        false ->
+            % We already closed this monitor because
+            % it was idle. Ignore this notification
             ok
     end,
     {noreply, Server};

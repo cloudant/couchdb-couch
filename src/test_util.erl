@@ -35,7 +35,7 @@
 -record(test_context, {mocked = [], started = [], module}).
 
 -define(DEFAULT_APPS,
-        [inets, ibrowse, ssl, config, couch_epi, couch_event, couch]).
+        [inets, ibrowse, ssl, couch_log, config, couch_epi, couch_event, couch]).
 
 srcdir() ->
     code:priv_dir(couch) ++ "/../../".
