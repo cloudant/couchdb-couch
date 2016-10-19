@@ -124,8 +124,9 @@ ensure_full_commit(Db, RequiredSeq) ->
     ok = gen_server:call(Pid, {full_commit, RequiredSeq}, infinity),
     {ok, StartTime}.
 
-close(#db{fd_monitor=Ref}) ->
+close(#db{name = DbName, fd_monitor=Ref}) ->
     erlang:demonitor(Ref, [flush]),
+    gen_server:cast(couch_server, {decref, DbName, self()}),
     ok.
 
 is_idle(#db{compactor_pid=nil, waiting_delayed_commit=nil} = Db) ->

@@ -557,6 +557,14 @@ handle_cast({incref, DbName, Client}, Server) ->
             ok
     end,
     {noreply, Server};
+handle_cast({decref, DbName, Client}, Server) ->
+    case ets:lookup(?MONITORS, DbName) of
+        [#mon{pid = Pid}] ->
+            gen_server:cast(Pid, {decref, Client});
+        [] ->
+            ok
+    end,
+    {noreply, Server};
 handle_cast({idle, DbName, MonPid}, Server) ->
     case gen_server:call(MonPid, get_ref_count) of
         0 ->
