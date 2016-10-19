@@ -82,7 +82,7 @@ open(DbName, Options0) ->
     Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
     case ets:lookup(?DBS, DbName) of
     [#db{fd=Fd, fd_monitor=Lock} = Db] when Lock =/= locked ->
-        incref(DbName),
+        gen_server:cast(?MODULE, {incref, DbName, self()}),
         {ok, Db#db{user_ctx=Ctx, fd_monitor=erlang:monitor(process,Fd)}};
     _ ->
         Timeout = couch_util:get_value(timeout, Options, infinity),
@@ -180,8 +180,6 @@ init([]) ->
     RootDir = config:get("couchdb", "database_dir", "."),
     MaxDbsOpen = list_to_integer(
             config:get("couchdb", "max_dbs_open", integer_to_list(?MAX_DBS_OPEN))),
-    UpdateLruOnRead =
-        config:get("couchdb", "update_lru_on_read", "true") =:= "true",
     ok = config:listen_for_changes(?MODULE, nil),
     ok = couch_file:init_delete_dir(RootDir),
     hash_admin_passwords(),
@@ -344,7 +342,7 @@ open_async(Server, From, DbName, Filepath, Options) ->
         true -> create;
         false -> open
     end,
-    Client = element(1, From)
+    Client = element(1, From),
     IsSysDb = lists:member(sys_db, Options),
     {ok, MonPid} = couch_server_monitor:start_link(DbName, Client, IsSysDb),
     Monitor = #mon{name = DbName, pid = MonPid},
@@ -383,7 +381,7 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     [#db{
         fd = ReqType,
         compactor_pid = Froms,
-        id_tree = #mon{pid = MonPid}
+        id_tree = #mon{}
     }] = ets:lookup(?DBS, DbName),
     [gen_server:reply(From, {ok, Db}) || From <- Froms],
     % Cancel the creation request if it exists.
@@ -451,6 +449,7 @@ handle_call({open, DbName, Options}, From, Server) ->
         end,
         {noreply, Server};
     [#db{} = Db] ->
+        [#mon{pid = MonPid}] = ets:lookup(?MONITORS, DbName),
         gen_server:cast(MonPid, {incref, element(1, From)}),
         {reply, {ok, Db}, Server}
     end;
@@ -538,16 +537,36 @@ handle_call({delete, DbName, Options}, _From, Server) ->
     Error ->
         {reply, Error, Server}
     end;
-handle_call({db_updated, #db{}=Db}, _From, Server0) ->
+handle_call({db_updated, #db{}=Db}, _From, Server) ->
     #db{name = DbName, instance_start_time = StartTime} = Db,
     case (catch ets:lookup_element(?DBS, DbName, #db.instance_start_time)) of
-        StarTime ->
+        StartTime ->
             true = ets:insert(?DBS, Db);
         _ ->
             ok
     end,
-    {reply, ok, Server};
+    {reply, ok, Server}.
 
+
+handle_cast({incref, DbName, Client}, Server) ->
+    case ets:lookup(?MONITORS, DbName) of
+        [#mon{pid = Pid}] ->
+            true = ets:delete(?IDLE, DbName),
+            gen_server:cast(Pid, {incref, Client});
+        [] ->
+            ok
+    end,
+    {noreply, Server};
+handle_cast({idle, DbName, MonPid}, Server) ->
+    case gen_server:call(MonPid, get_ref_count) of
+        0 ->
+            ets:insert(?IDLE, #mon{name = DbName, pid = MonPid});
+        _ ->
+            % A client requested this database while the
+            % idle message was in flight so ignore.
+            ok
+    end,
+    {noreply, Server};
 handle_cast(Msg, Server) ->
     {stop, {unknown_cast_message, Msg}, Server}.
 

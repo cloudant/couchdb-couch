@@ -44,7 +44,7 @@ start_link(DbName, Client, IsSysDb) ->
 
 
 init({DbName, Client, IsSysDb}) ->
-    erlang:monitor(process, Pid),
+    erlang:monitor(process, Client),
     {ok, #st{
         name = DbName,
         ref_count = 1,
