@@ -67,11 +67,11 @@ get_uuid() ->
 
 get_stats() ->
     {ok, #server{start_time=Time,dbs_open=Open}} =
-            gen_server:call(couch_server, get_server),
+            gen_server:call(?MODULE, get_server),
     [{start_time, ?l2b(Time)}, {dbs_open, Open}].
 
 sup_start_link() ->
-    gen_server:start_link({local, couch_server}, couch_server, [], []).
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 
 open(DbName, Options0) ->
@@ -84,13 +84,13 @@ open(DbName, Options0) ->
     _ ->
         Timeout = couch_util:get_value(timeout, Options, infinity),
         Create = couch_util:get_value(create_if_missing, Options, false),
-        case gen_server:call(couch_server, {open, DbName, Options}, Timeout) of
+        case gen_server:call(?MODULE, {open, DbName, Options}, Timeout) of
         {ok, #db{fd=Fd} = Db} ->
             update_lru(DbName, Options),
             {ok, Db#db{user_ctx=Ctx, fd_monitor=erlang:monitor(process,Fd)}};
         {not_found, no_db_file} when Create ->
             couch_log:warning("creating missing database: ~s", [DbName]),
-            couch_server:create(DbName, Options);
+            ?MODULE:create(DbName, Options);
         Error ->
             Error
         end
@@ -98,16 +98,16 @@ open(DbName, Options0) ->
 
 update_lru(DbName, Options) ->
     case lists:member(sys_db, Options) of
-        false -> gen_server:cast(couch_server, {update_lru, DbName});
+        false -> gen_server:cast(?MODULE, {update_lru, DbName});
         true -> ok
     end.
 
 close_lru() ->
-    gen_server:call(couch_server, close_lru).
+    gen_server:call(?MODULE, close_lru).
 
 create(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
-    case gen_server:call(couch_server, {create, DbName, Options}, infinity) of
+    case gen_server:call(?MODULE, {create, DbName, Options}, infinity) of
     {ok, #db{fd=Fd} = Db} ->
         Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
         {ok, Db#db{user_ctx=Ctx, fd_monitor=erlang:monitor(process,Fd)}};
@@ -116,7 +116,7 @@ create(DbName, Options0) ->
     end.
 
 delete(DbName, Options) ->
-    gen_server:call(couch_server, {delete, DbName, Options}, infinity).
+    gen_server:call(?MODULE, {delete, DbName, Options}, infinity).
 
 maybe_add_sys_db_callbacks(DbName, Options) when is_binary(DbName) ->
     maybe_add_sys_db_callbacks(?b2l(DbName), Options);
@@ -217,16 +217,16 @@ terminate(Reason, Srv) ->
     ok.
 
 handle_config_change("couchdb", "database_dir", _, _, _) ->
-    exit(whereis(couch_server), config_change),
+    exit(whereis(?MODULE), config_change),
     remove_handler;
 handle_config_change("couchdb", "update_lru_on_read", "true", _, _) ->
-    {ok, gen_server:call(couch_server,{set_update_lru_on_read,true})};
+    {ok, gen_server:call(?MODULE,{set_update_lru_on_read,true})};
 handle_config_change("couchdb", "update_lru_on_read", _, _, _) ->
-    {ok, gen_server:call(couch_server,{set_update_lru_on_read,false})};
+    {ok, gen_server:call(?MODULE,{set_update_lru_on_read,false})};
 handle_config_change("couchdb", "max_dbs_open", Max, _, _) when is_list(Max) ->
-    {ok, gen_server:call(couch_server,{set_max_dbs_open,list_to_integer(Max)})};
+    {ok, gen_server:call(?MODULE,{set_max_dbs_open,list_to_integer(Max)})};
 handle_config_change("couchdb", "max_dbs_open", _, _, _) ->
-    {ok, gen_server:call(couch_server,{set_max_dbs_open,?MAX_DBS_OPEN})};
+    {ok, gen_server:call(?MODULE,{set_max_dbs_open,?MAX_DBS_OPEN})};
 handle_config_change("admins", _, _, Persist, _) ->
     % spawn here so couch event manager doesn't deadlock
     {ok, spawn(fun() -> hash_admin_passwords(Persist) end)};
@@ -259,7 +259,7 @@ all_databases() ->
     {ok, lists:usort(DbList)}.
 
 all_databases(Fun, Acc0) ->
-    {ok, #server{root_dir=Root}} = gen_server:call(couch_server, get_server),
+    {ok, #server{root_dir=Root}} = gen_server:call(?MODULE, get_server),
     NormRoot = couch_util:normpath(Root),
     FinalAcc = try
     filelib:fold_files(Root,
