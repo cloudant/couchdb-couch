@@ -206,8 +206,7 @@ close(Lru, Ref) ->
                         couch_server,
                         lru_skip
                     ]),
-                    NewLru = close(Lru, Next),
-                    update(DbName, NewLru)
+                    close(Lru, Next)
             end;
         false ->
             NewLru = close(Lru, Next),
