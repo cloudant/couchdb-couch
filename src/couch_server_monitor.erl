@@ -11,126 +11,115 @@
 % the License.
 
 -module(couch_server_monitor).
--behaviour(gen_server).
 -vsn(1).
 
 
 -export([
-    start_link/3
+    create/1,
+    refresh/2,
+    cancel/1
 ]).
 
 -export([
     init/1,
-    terminate/2,
-    handle_call/3,
-    handle_cast/2,
-    handle_info/2,
-    code_change/3
+    handle_msg/1
 ]).
 
 
+-include("couch_db.hrl").
+
+
+-record(monitor, {
+    ref,
+    pid
+}).
+
 -record(st, {
-    name,
-    refs,
+    dbname,
+    instance_start_time,
+    client,
     is_sys_db
 }).
 
 
 -define(COUCH_SERVER, couch_server).
+-define(COUNTERS, couch_dbs_counters).
+-define(CANCEL_TIMEOUT, 5000).
 
 
-start_link(DbName, Client, IsSysDb) ->
-    gen_server:start_link(?MODULE, {DbName, Client, IsSysDb}, []).
+create(#db{name = DbName, fd = Fd, instance_start_time = IST} = Db)
+        when is_binary(DbName), is_pid(Fd), is_binary(IST) ->
+    St = #st{
+        dbname = DbName,
+        instance_start_time = IST,
+        client = self(),
+        is_sys_db = couch_db:is_system_db(Db)
+    },
+    #monitor{
+        ref = erlang:monitor(process, Fd),
+        pid = spawn(?MODULE, init, [St])
+    }.
 
 
-init({DbName, Client, IsSysDb}) ->
-    Ref = erlang:monitor(process, Client),
-    % Values are lists of refs because a single client
-    % can open a db more than once.
-    {ok, Refs} = khash:from_list([{Client, [Ref]}]),
-    {ok, #st{
-        name = DbName,
-        refs = Refs,
-        is_sys_db = IsSysDb
-    }}.
+refresh(#monitor{} = Monitor, Fd) ->
+    #monitor{
+        ref = OldRef
+    } = Monitor,
+    erlang:demonitor(OldRef, [flush]),
+    NewRef = erlang:monitor(process, Fd),
+    Monitor#monitor{
+        ref = NewRef
+    }.
 
 
-terminate(_Reason, _St) ->
-    ok.
-
-
-handle_call({decref, Client}, From, St) ->
-    {noreply, NewSt} = handle_cast({decref, Client}, St),
-    handle_call(is_idle, From, NewSt);
-
-handle_call(is_idle, _From, St) ->
-    Reply = case khash:size(St#st.refs) of
-        0 -> true;
-        _ -> false
-    end,
-    {reply, Reply, St};
-
-handle_call(status, _From, St) ->
-    {reply, {khash:to_list(St#st.refs), St#st.is_sys_db}, St};
-
-handle_call(Msg, _From, St) ->
-    {reply, {bad_call, Msg}, St}.
-
-
-handle_cast({incref, Client}, St) ->
-    Ref = erlang:monitor(process, Client),
-    ExistingRefs = khash:get(St#st.refs, Client, []),
-    khash:put(St#st.refs, Client, [Ref | ExistingRefs]),
-    {noreply, St};
-
-handle_cast({decref, Client}, St) ->
-    case khash:lookup(St#st.refs, Client) of
-        {value, [Ref | RestRefs]} ->
-            erlang:demonitor(Ref, [flush]),
-            maybe_remove_client(St, Client, RestRefs);
-        not_found ->
-            % We got the 'DOWN' message before couch_server
-            % told us that the client closed the db
+cancel(#monitor{} = Monitor) ->
+    #monitor{
+        ref = Ref,
+        pid = Pid
+    } = Monitor,
+    erlang:demonitor(Ref, [flush]),
+    MRef = erlang:monitor(process, Pid),
+    Pid ! {cancel, self()},
+    receive
+        {'DOWN', _, _, Pid, _} ->
             ok
-    end,
-    {noreply, St};
-
-handle_cast(stop, St) ->
-    {stop, normal, St};
-
-handle_cast(_Msg, St) ->
-    {noreply, St}.
-
-
-handle_info({'DOWN', Ref, process, Pid, _Reason}, St) ->
-    remove_ref(St, Pid, Ref),
-    {noreply, St};
-
-handle_info(_Msg, St) ->
-    {noreply, St}.
-
-
-code_change(_Vsn, St, _Extra) ->
-    {ok, St}.
-
-
-remove_ref(St, Client, Ref) ->
-    {value, ExistingRefs} = khash:lookup(St#st.refs, Client),
-    RestRefs = ExistingRefs -- [Ref],
-    true = RestRefs /= ExistingRefs,
-    maybe_remove_client(St, Client, RestRefs).
-
-
-maybe_remove_client(St, Client, []) ->
-    khash:del(St#st.refs, Client),
-    maybe_send_idle(St);
-
-maybe_remove_client(St, Client, Refs) ->
-    khash:put(St#st.refs, Client, Refs).
-
-
-maybe_send_idle(St) ->
-    HasClients = khash:size(St#st.refs) > 0,
-    if HasClients or St#st.is_sys_db -> ok; true ->
-        gen_server:cast(?COUCH_SERVER, {idle, St#st.name, self()})
+    after ?CANCEL_TIMEOUT ->
+        erlang:demonitor(MRef, [flush]),
+        erlang:error({timeout, couch_server_monitor_cancel})
     end.
+
+
+init(St) ->
+    erlang:monitor(process, St#st.client),
+    case ets:update_counter(?COUNTERS, key(St), {2, 1}) of
+        1 -> gen_server:cast(?COUCH_SERVER, {not_idle, key(St)});
+        N when N > 1 -> ok
+    end,
+    erlang:hibernate(?MODULE, handle_msg, [St]).
+
+
+terminate(St) ->
+    #st{is_sys_db = IsSysDb} = St,
+    case (catch ets:update_counter(?COUNTERS, key(St), {2, -1})) of
+        0 when not IsSysDb ->
+            gen_server:cast(?COUCH_SERVER, {idle, key(St)});
+        _ ->
+            ok
+    end.
+
+
+handle_msg(St) ->
+    #st{client = Pid} = St,
+    receive
+        {'DOWN', _, _, Pid, _} ->
+            terminate(St);
+        {cancel, Pid} ->
+            terminate(St);
+        Other ->
+            Msg = {bad_monitor_message, St#st.dbname, Other},
+            gen_server:cast(?COUCH_SERVER, Msg)
+    end.
+
+
+key(St) ->
+    {St#st.dbname, St#st.instance_start_time}.

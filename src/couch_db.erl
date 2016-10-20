@@ -101,15 +101,14 @@ open(DbName, Options) ->
         Else -> Else
     end.
 
-reopen(#db{main_pid = Pid, fd = Fd, fd_monitor = OldRef, user_ctx = UserCtx}) ->
+reopen(#db{main_pid = Pid, fd = Fd, fd_monitor = OldMon, user_ctx = UserCtx}) ->
     {ok, #db{fd = NewFd} = NewDb} = gen_server:call(Pid, get_db, infinity),
     case NewFd =:= Fd of
     true ->
-        {ok, NewDb#db{user_ctx = UserCtx}};
+        {ok, NewDb#db{user_ctx = UserCtx, fd_monitor = OldMon}};
     false ->
-        erlang:demonitor(OldRef, [flush]),
-        NewRef = erlang:monitor(process, NewFd),
-        {ok, NewDb#db{user_ctx = UserCtx, fd_monitor = NewRef}}
+        NewMon = couch_server_monitor:refresh(OldMon, NewFd),
+        {ok, NewDb#db{user_ctx = UserCtx, fd_monitor = NewMon}}
     end.
 
 is_system_db(#db{options = Options}) ->
@@ -124,9 +123,8 @@ ensure_full_commit(Db, RequiredSeq) ->
     ok = gen_server:call(Pid, {full_commit, RequiredSeq}, infinity),
     {ok, StartTime}.
 
-close(#db{name = DbName, fd_monitor=Ref}) ->
-    erlang:demonitor(Ref, [flush]),
-    gen_server:cast(couch_server, {decref, DbName, self()}),
+close(#db{fd_monitor = Mon}) ->
+    couch_server_monitor:cancel(Mon),
     ok.
 
 is_idle(#db{compactor_pid=nil, waiting_delayed_commit=nil} = Db) ->
