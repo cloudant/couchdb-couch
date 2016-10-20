@@ -31,7 +31,8 @@
 
 -record(monitor, {
     ref,
-    pid
+    pid,
+    client
 }).
 
 -record(st, {
@@ -57,11 +58,18 @@ create(#db{name = DbName, fd = Fd, instance_start_time = IST} = Db)
     },
     #monitor{
         ref = erlang:monitor(process, Fd),
-        pid = spawn(?MODULE, init, [St])
+        pid = spawn(?MODULE, init, [St]),
+        client = self()
     }.
 
 
 refresh(#monitor{} = Monitor, Fd) ->
+    case Monitor#monitor.client == self() of
+        true ->
+            ok;
+        false ->
+            erlang:exit({bad_monitor, client_mismatch})
+    end,
     #monitor{
         ref = OldRef
     } = Monitor,
@@ -73,6 +81,18 @@ refresh(#monitor{} = Monitor, Fd) ->
 
 
 cancel(#monitor{} = Monitor) ->
+    case Monitor#monitor.client == self() of
+        true ->
+            do_cancel(Monitor);
+        false ->
+            % A db record was shared across
+            % processes so we'll ignore to
+            % cover fabric:get_security's bug
+            ignored
+    end.
+
+
+do_cancel(Monitor) ->
     #monitor{
         ref = Ref,
         pid = Pid
