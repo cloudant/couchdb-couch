@@ -29,7 +29,6 @@
 -define(DBS, couch_dbs).
 -define(PIDS, couch_dbs_pid_to_name).
 -define(COUNTERS, couch_dbs_counters).
--define(IDLE, couch_dbs_idle).
 
 -define(MAX_DBS_OPEN, 100).
 -define(RELISTEN_DELAY, 5000).
@@ -86,10 +85,7 @@ open(DbName, Options0) ->
         Create = couch_util:get_value(create_if_missing, Options, false),
         case gen_server:call(couch_server, {open, DbName, Options}, Timeout) of
         {ok, #db{} = Db} ->
-            {ok, Db#db{
-                user_ctx = Ctx,
-                fd_monitor = couch_server_monitor:create(Db)
-            }};
+            {ok, Db#db{user_ctx = Ctx}};
         {not_found, no_db_file} when Create ->
             couch_log:warning("creating missing database: ~s", [DbName]),
             couch_server:create(DbName, Options);
@@ -100,13 +96,10 @@ open(DbName, Options0) ->
 
 create(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
+    Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
     case gen_server:call(couch_server, {create, DbName, Options}, infinity) of
     {ok, #db{} = Db} ->
-        Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
-        {ok, Db#db{
-            user_ctx = Ctx,
-            fd_monitor = couch_server_monitor:create(Db)
-        }};
+        {ok, Db#db{user_ctx = Ctx}};
     Error ->
         Error
     end.
@@ -204,11 +197,6 @@ init([]) ->
             public,
             named_table,
             {write_concurrency, true}
-        ]),
-    ets:new(?IDLE, [
-            set,
-            protected,
-            named_table
         ]),
     process_flag(trap_exit, true),
     {ok, #server{root_dir=RootDir,
@@ -312,100 +300,69 @@ maybe_close_idle_db(Server) ->
 
 
 close_idle_db() ->
-    case ets:first(?IDLE) of
-        {DbName, IST} ->
-            case close_idle_db(DbName, IST) of
+    case ets:match_object(?COUNTERS, {'_', 0}, 25) of
+        {Counters, Continuation} ->
+            case close_first_idle(Counters) of
                 closed ->
                     ok;
                 not_closed ->
-                    close_idle_db()
+                    close_idle_db(Continuation)
             end;
         '$end_of_table' ->
-            scan_idle_dbs()
+            erlang:error(all_dbs_active)
     end.
 
 
-close_idle_db(DbName, IST) ->
-    case ets:update_element(?DBS, DbName, {#db.fd_monitor, locked}) of
-        true ->
-            close_idle_db_int(DbName, IST);
-        false ->
-            true = ets:delete(?COUNTERS, {DbName, IST}),
-            true = ets:delete(?IDLE, {DbName, IST}),
-            not_closed
+close_idle_db(Continuation) ->
+    case ets:match_object(Continuation) of
+        {Counters, Continuation} ->
+            case close_first_idle(Counters) of
+                closed ->
+                    ok;
+                not_closed ->
+                    close_idle_db(Continuation)
+            end;
+        '$end_of_table' ->
+            erlang:error(all_dbs_active)
     end.
 
 
-close_idle_db_int(DbName, IST1) ->
+close_first_idle([]) ->
+    not_closed;
+
+close_first_idle([{{DbName, IST}, _} | RestIdle]) ->
+    case close_idle_db(DbName, IST) of
+        closed ->
+            closed;
+        not_closed ->
+            close_first_idle(RestIdle)
+    end.
+
+
+close_idle_db(DbName, IST1) ->
+    true = ets:update_element(?DBS, DbName, {#db.fd_monitor, locked})
     [#db{} = Db] = ets:lookup(?DBS, DbName),
     #db{
         main_pid = Pid,
         instance_start_time = IST2
     } = Db,
+    IsIdle = couch_db:is_idle(Db),
     IsSysDb = couch_db:is_system_db(Db),
-    case couch_db:is_idle(Db) of
-        true when not IsSysDb ->
+    IsSameInstance = IST1 == IST2,
+    case IsIdle and not IsSysDb and IsSameInstance of
+        true ->
             exit(Pid, kill),
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, Pid),
             true = ets:delete(?COUNTERS, {DbName, IST1}),
-            true = ets:delete(?IDLE, {DbName, IST1}),
-            % This db was recreated but we lucked out and found
-            % it idle.
-            if IST1 == IST2 -> ok; true ->
-                true = ets:delete(?COUNTERS, {DbName, IST2}),
-                true = ets:delete(?IDLE, {DbName, IST2})
-            end,
             closed;
         _ ->
-            % Someone must've just opened this database but
-            % the not_idle message hasn't reached us yet, or
-            % its a sys db that got inserted during an idle
-            % db scan.
-            true = ets:delete(?IDLE, {DbName, IST1}),
+            % Someone must've just opened this database or
+            % we're working on an old counter
             if IST1 == IST2 -> ok; true ->
-                true = ets:delete(?IDLE, {DbName, IST2})
+                ets:delete(?COUNTERS, {DbName, IST1})
             end,
             not_closed
-    end.
-
-
-% This function exists because its possible that
-% we can get messages out of order from our
-% couch_server_monitors. If a db is opened and
-% closed in quick succession we could get the
-% idle/not_idle messages out of order. Thus when
-% we detect no idle dbs in ?IDLE we have to scan
-% ?COUNTERS for anything that's zero.
-%
-% Theoretically this will be rather infrequent and
-% our select will only return us a small number of
-% dbs so we do it in one pass rather than using
-% continuations.
-scan_idle_dbs() ->
-    case ets:match_object(?COUNTERS, {'_', 0}) of
-        [] ->
-            erlang:error(all_dbs_active);
-        IdleDbs ->
-            close_first_idle(IdleDbs)
-    end.
-
-
-close_first_idle([]) ->
-    erlang:error(all_dbs_active);
-
-close_first_idle([{{DbName, Idle}, _} | RestIdle]) ->
-    case close_idle_db(DbName, Idle) of
-        closed ->
-            % Put the rest of the found idle databases
-            % into ?IDLE so we minimize the number of
-            % scans that need to happen due to timing
-            % issues.
-            lists:foreach(fun({Key, _}) ->
-                ets:insert(?IDLE, {Key})
-            end, RestIdle);
-        not_closed ->
-            close_first_idle(RestIdle)
     end.
 
 
@@ -427,6 +384,12 @@ open_async(Server, From, DbName, RootDir, Options) ->
                 Resp0;
             Error ->
                 Error
+        end,
+        case Resp of
+            {ok, _} ->
+                ok;
+            Else ->
+                couch_log:info("open_result error ~p for ~s", [Else, DbName])
         end,
         gen_server:call(Parent, {open_result, T0, DbName, Resp}, infinity),
         unlink(Parent)
@@ -464,8 +427,16 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     % - compactor_pid used to store clients
     % - fd used to possibly store a creation request
     [#db{fd = ReqType, compactor_pid = Froms}] = ets:lookup(?DBS, DbName),
+
+    % Create a monitors here to avoid race conditions
+    % with idle closures.
     create_counter(Db),
-    [gen_server:reply(From, {ok, Db}) || From <- Froms],
+    lists:foreach(fun(From) ->
+        Mon = couch_server_monitor:create(Db, element(1, From)),
+        NewDb = Db#db{fd_monitor = Mon},
+        gen_server:reply(First, {ok, MonDb})
+    end, Froms),
+
     % Cancel the creation request if it exists.
     case ReqType of
         {create, DbName, _RootDir, _Options, CrFrom} ->
@@ -484,7 +455,6 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
     % - fd used to possibly store a creation request
     [#db{fd = ReqType, compactor_pid = Froms} = Db] = ets:lookup(?DBS, DbName),
     [gen_server:reply(From, Error) || From <- Froms],
-    couch_log:info("open_result error ~p for ~s", [Error, DbName]),
     true = ets:delete(?DBS, DbName),
     true = ets:delete(?PIDS, FromPid),
     NewServer = case ReqType of
@@ -597,19 +567,6 @@ handle_call({db_updated, #db{}=Db}, _From, Server) ->
     {reply, ok, Server}.
 
 
-handle_cast({idle, {DbName, IST}}, Server) ->
-    case ets:member(?DBS, DbName) of
-        true ->
-            true = ets:insert(?IDLE, {{DbName, IST}});
-        false ->
-            % We've closed this db while we had an idle
-            % message in our mailbox
-            ignore
-    end,
-    {noreply, Server};
-handle_cast({not_idle, {DbName, IST}}, Server) ->
-    true = ets:delete(?IDLE, {{DbName, IST}}),
-    {noreply, Server};
 handle_cast({bad_monitor_message, DbName, Msg}, Server) ->
     {stop, {bad_monitor_message, DbName, Msg}, Server};
 handle_cast(Msg, Server) ->
@@ -667,8 +624,7 @@ create_counter(#db{instance_start_time = IST} = Db) when is_binary(IST) ->
 
 
 delete_counter(#db{instance_start_time = IST} = Db) when is_binary(IST) ->
-    true = ets:delete(?COUNTERS, {Db#db.name, IST}),
-    true = ets:delete(?IDLE, {Db#db.name, IST}).
+    true = ets:delete(?COUNTERS, {Db#db.name, IST}).
 
 
 -ifdef(TEST).

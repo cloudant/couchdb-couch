@@ -16,6 +16,7 @@
 
 -export([
     create/1,
+    create/2,
     refresh/2,
     cancel/1
 ]).
@@ -48,7 +49,11 @@
 -define(CANCEL_TIMEOUT, 5000).
 
 
-create(#db{name = DbName, fd = Fd, instance_start_time = IST} = Db)
+create(Db) ->
+    create(Db, self()).
+
+
+create(#db{name = DbName, fd = Fd, instance_start_time = IST} = Db, Client)
         when is_binary(DbName), is_pid(Fd), is_binary(IST) ->
     St = #st{
         dbname = DbName,
@@ -111,24 +116,15 @@ do_cancel(Monitor) ->
 
 init(St) ->
     erlang:monitor(process, St#st.client),
-    Resp = case (catch ets:update_counter(?COUNTERS, key(St), {2, 1})) of
-        1 -> gen_server:cast(?COUCH_SERVER, {not_idle, key(St)});
-        N when N > 1 -> ok;
-        _ -> exit
-    end,
-    if Resp == exit -> ok; true ->
-        erlang:hibernate(?MODULE, handle_msg, [St])
-    end.
+    ets:update_counter(?COUNTERS, key(St), {2, 1}),
+    erlang:hibernate(?MODULE, handle_msg, [NewSt]).
 
 
 terminate(St) ->
     #st{is_sys_db = IsSysDb} = St,
-    case (catch ets:update_counter(?COUNTERS, key(St), {2, -1})) of
-        0 when not IsSysDb ->
-            gen_server:cast(?COUCH_SERVER, {idle, key(St)});
-        _ ->
-            ok
-    end.
+    % We may have been delayed until after the databsae
+    % was closed so ignore any errors here.
+    catch ets:update_counter(?COUNTERS, key(St), {2, -1}).
 
 
 handle_msg(St) ->
