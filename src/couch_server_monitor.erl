@@ -111,11 +111,14 @@ do_cancel(Monitor) ->
 
 init(St) ->
     erlang:monitor(process, St#st.client),
-    case ets:update_counter(?COUNTERS, key(St), {2, 1}) of
+    Resp = case (catch ets:update_counter(?COUNTERS, key(St), {2, 1})) of
         1 -> gen_server:cast(?COUCH_SERVER, {not_idle, key(St)});
-        N when N > 1 -> ok
+        N when N > 1 -> ok;
+        _ -> exit
     end,
-    erlang:hibernate(?MODULE, handle_msg, [St]).
+    if Resp == exit -> ok; true ->
+        erlang:hibernate(?MODULE, handle_msg, [St])
+    end.
 
 
 terminate(St) ->
