@@ -324,8 +324,18 @@ close_idle_db() ->
     end.
 
 
-close_idle_db(DbName, IST1) ->
-    true = ets:update_element(?DBS, DbName, {#db.fd_monitor, locked}),
+close_idle_db(DbName, IST) ->
+    case ets:update_element(?DBS, DbName, {#db.fd_monitor, locked}) of
+        true ->
+            close_idle_db_int(DbName, IST);
+        false ->
+            true = ets:delete(?COUNTERS, {DbName, IST}),
+            true = ets:delete(?IDLE, {DbName, IST}),
+            not_closed
+    end.
+
+
+close_idle_db_int(DbName, IST1) ->
     [#db{} = Db] = ets:lookup(?DBS, DbName),
     #db{
         main_pid = Pid,
@@ -591,7 +601,14 @@ handle_call({db_updated, #db{}=Db}, _From, Server) ->
 
 
 handle_cast({idle, {DbName, IST}}, Server) ->
-    true = ets:insert(?IDLE, {{DbName, IST}}),
+    case ets:member(?DBS, DbName) of
+        true ->
+            true = ets:insert(?IDLE, {{DbName, IST}});
+        false ->
+            % We've closed this db while we had an idle
+            % message in our mailbox
+            ignore
+    end,
     {noreply, Server};
 handle_cast({not_idle, {DbName, IST}}, Server) ->
     true = ets:delete(?IDLE, {{DbName, IST}}),
@@ -653,7 +670,8 @@ create_counter(#db{instance_start_time = IST} = Db) when is_binary(IST) ->
 
 
 delete_counter(#db{instance_start_time = IST} = Db) when is_binary(IST) ->
-    true = ets:delete(?COUNTERS, {Db#db.name, IST}).
+    true = ets:delete(?COUNTERS, {Db#db.name, IST}),
+    true = ets:delete(?IDLE, {Db#db.name, IST}).
 
 
 -ifdef(TEST).
