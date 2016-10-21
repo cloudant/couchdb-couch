@@ -401,7 +401,7 @@ close_first_idle([{{DbName, Idle}, _} | RestIdle]) ->
             % scans that need to happen due to timing
             % issues.
             lists:foreach(fun({Key, _}) ->
-                ets:insert(?IDLE, Key)
+                ets:insert(?IDLE, {Key})
             end, RestIdle);
         not_closed ->
             close_first_idle(RestIdle)
