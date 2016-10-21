@@ -146,9 +146,6 @@ path_ends_with(Path, Suffix) when is_binary(Suffix) ->
 path_ends_with(Path, Suffix) when is_list(Suffix) ->
     path_ends_with(Path, ?l2b(Suffix)).
 
-check_dbname(#server{}, DbName) ->
-    couch_db:validate_dbname(DbName).
-
 is_admin(User, ClearPwd) ->
     case config:get("admins", User) of
     "-hashed-" ++ HashedPwdAndSalt ->
@@ -161,8 +158,12 @@ is_admin(User, ClearPwd) ->
 has_admins() ->
     config:get("admins") /= [].
 
-get_full_filename(Server, DbName) ->
-    filename:join([Server#server.root_dir, "./" ++ DbName ++ ".couch"]).
+
+get_full_filename(#server{root_dir = RootDir}, DbName) ->
+    get_full_filename(RootDir, DbName);
+
+get_full_filename(RootDir, DbName) when is_list(RootDir) ->
+    filename:join([RootDir, "./" ++ DbName ++ ".couch"]).
 
 hash_admin_passwords() ->
     hash_admin_passwords(true).
@@ -408,18 +409,26 @@ close_first_idle([{{DbName, Idle}, _} | RestIdle]) ->
     end.
 
 
-open_async(Server, From, DbName, Filepath, Options) ->
+open_async(Server, From, DbName, RootDir, Options) ->
     Parent = self(),
     T0 = os:timestamp(),
     Opener = spawn_link(fun() ->
-        Res = couch_db:start_link(DbName, Filepath, Options),
-        case {Res, lists:member(create, Options)} of
-            {{ok, _Db}, true} ->
-                couch_event:notify(DbName, created);
-            _ ->
-                ok
+        DbNameList = binary_to_list(DbName),
+        Filepath = get_full_filename(RootDir, DbNameList),
+        Resp = case couch_db:validate_dbname(DbName) of
+            ok ->
+                Resp0 = couch_db:start_link(DbName, Filepath, Options),
+                case {Resp0, lists:member(create, Options)} of
+                    {{ok, _Db}, true} ->
+                        couch_event:notify(DbName, created);
+                    _ ->
+                        ok
+                end,
+                Resp0;
+            Error ->
+                Error
         end,
-        gen_server:call(Parent, {open_result, T0, DbName, Res}, infinity),
+        gen_server:call(Parent, {open_result, T0, DbName, Resp}, infinity),
         unlink(Parent)
     end),
     ReqType = case lists:member(create, Options) of
@@ -459,7 +468,7 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     [gen_server:reply(From, {ok, Db}) || From <- Froms],
     % Cancel the creation request if it exists.
     case ReqType of
-        {create, DbName, _Filepath, _Options, CrFrom} ->
+        {create, DbName, _RootDir, _Options, CrFrom} ->
             gen_server:reply(CrFrom, file_exists);
         _ ->
             ok
@@ -479,27 +488,21 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
     true = ets:delete(?DBS, DbName),
     true = ets:delete(?PIDS, FromPid),
     NewServer = case ReqType of
-        {create, DbName, Filepath, Options, CrFrom} ->
-            open_async(Server, CrFrom, DbName, Filepath, Options);
+        {create, DbName, RootDir, Options, CrFrom} ->
+            open_async(Server, CrFrom, DbName, RootDir, Options);
         _ ->
             Server
     end,
     {reply, ok, db_closed(NewServer, Db#db.options)};
 handle_call({open, DbName, Options}, From, Server) ->
+    RootDir = Server#server.root_dir,
     case ets:lookup(?DBS, DbName) of
     [] ->
-        DbNameList = binary_to_list(DbName),
-        case check_dbname(Server, DbNameList) of
-        ok ->
-            case make_room(Server, Options) of
+        case make_room(Server, Options) of
             {ok, Server2} ->
-                Filepath = get_full_filename(Server, DbNameList),
-                {noreply, open_async(Server2, From, DbName, Filepath, Options)};
+                {noreply, open_async(Server2, From, DbName, RootDir, Options)};
             CloseError ->
                 {reply, CloseError, Server}
-            end;
-        Error ->
-            {reply, Error, Server}
         end;
     [#db{compactor_pid = Froms} = Db] when is_list(Froms) ->
         % icky hack of field values
@@ -514,15 +517,12 @@ handle_call({open, DbName, Options}, From, Server) ->
         {reply, {ok, Db}, Server}
     end;
 handle_call({create, DbName, Options}, From, Server) ->
-    DbNameList = binary_to_list(DbName),
-    Filepath = get_full_filename(Server, DbNameList),
-    case check_dbname(Server, DbNameList) of
-    ok ->
-        case ets:lookup(?DBS, DbName) of
+    RootDir = Server#server.root_dir,
+    case ets:lookup(?DBS, DbName) of
         [] ->
             case make_room(Server, Options) of
             {ok, Server2} ->
-                {noreply, open_async(Server2, From, DbName, Filepath,
+                {noreply, open_async(Server2, From, DbName, RootDir,
                         [create | Options])};
             CloseError ->
                 {reply, CloseError, Server}
@@ -533,18 +533,15 @@ handle_call({create, DbName, Options}, From, Server) ->
             % to wait while we figure out if it'll succeed.
             % icky hack of field values - fd used to store create request
             CrOptions = [create | Options],
-            NewDb = Db#db{fd={create, DbName, Filepath, CrOptions, From}},
+            NewDb = Db#db{fd={create, DbName, RootDir, CrOptions, From}},
             true = ets:insert(?DBS, NewDb),
             {noreply, Server};
         [_AlreadyRunningDb] ->
             {reply, file_exists, Server}
-        end;
-    Error ->
-        {reply, Error, Server}
     end;
 handle_call({delete, DbName, Options}, _From, Server) ->
     DbNameList = binary_to_list(DbName),
-    case check_dbname(Server, DbNameList) of
+    case couch_db:validate_dbname(DbName) of
     ok ->
         FullFilepath = get_full_filename(Server, DbNameList),
         Server2 =
