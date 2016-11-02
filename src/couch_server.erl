@@ -84,8 +84,11 @@ open(DbName, Options0) ->
         Timeout = couch_util:get_value(timeout, Options, infinity),
         Create = couch_util:get_value(create_if_missing, Options, false),
         case gen_server:call(couch_server, {open, DbName, Options}, Timeout) of
-        {ok, #db{} = Db} ->
-            {ok, Db#db{user_ctx = Ctx}};
+        {ok, #db{fd_monitor = Mon} = Db} ->
+            {ok, Db#db{
+                user_ctx = Ctx,
+                fd_monitor = couch_server_monitor:update(Mon)
+            }};
         {not_found, no_db_file} when Create ->
             couch_log:warning("creating missing database: ~s", [DbName]),
             couch_server:create(DbName, Options);
@@ -98,8 +101,11 @@ create(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
     Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
     case gen_server:call(couch_server, {create, DbName, Options}, infinity) of
-    {ok, #db{} = Db} ->
-        {ok, Db#db{user_ctx = Ctx}};
+    {ok, #db{fd_monitor = Mon} = Db} ->
+        {ok, Db#db{
+            user_ctx = Ctx,
+            fd_monitor = couch_server_monitor:update(Mon)
+        }};
     Error ->
         Error
     end.
@@ -300,7 +306,7 @@ maybe_close_idle_db(Server) ->
 
 
 close_idle_db() ->
-    case ets:match_object(?COUNTERS, {'_', 0}, 25) of
+    case ets:match_object(?COUNTERS, {'_', 0, false}, 1) of
         {Counters, Continuation} ->
             case close_first_idle(Counters) of
                 closed ->
@@ -315,12 +321,12 @@ close_idle_db() ->
 
 close_idle_db(Continuation) ->
     case ets:match_object(Continuation) of
-        {Counters, Continuation} ->
+        {Counters, NewContinuation} ->
             case close_first_idle(Counters) of
                 closed ->
                     ok;
                 not_closed ->
-                    close_idle_db(Continuation)
+                    close_idle_db(NewContinuation)
             end;
         '$end_of_table' ->
             erlang:error(all_dbs_active)
@@ -330,7 +336,7 @@ close_idle_db(Continuation) ->
 close_first_idle([]) ->
     not_closed;
 
-close_first_idle([{{DbName, IST}, _} | RestIdle]) ->
+close_first_idle([{{DbName, IST}, _, false} | RestIdle]) ->
     case close_idle_db(DbName, IST) of
         closed ->
             closed;
@@ -340,23 +346,22 @@ close_first_idle([{{DbName, IST}, _} | RestIdle]) ->
 
 
 close_idle_db(DbName, IST1) ->
-    true = ets:update_element(?DBS, DbName, {#db.fd_monitor, locked})
+    true = ets:update_element(?DBS, DbName, {#db.fd_monitor, locked}),
     [#db{} = Db] = ets:lookup(?DBS, DbName),
     #db{
         main_pid = Pid,
         instance_start_time = IST2
     } = Db,
     IsIdle = couch_db:is_idle(Db),
-    IsSysDb = couch_db:is_system_db(Db),
     IsSameInstance = IST1 == IST2,
-    case IsIdle and not IsSysDb and IsSameInstance of
+    case IsIdle and IsSameInstance of
         true ->
             exit(Pid, kill),
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, Pid),
             true = ets:delete(?COUNTERS, {DbName, IST1}),
             closed;
-        _ ->
+        false ->
             % Someone must've just opened this database or
             % we're working on an old counter
             if IST1 == IST2 -> ok; true ->
@@ -432,9 +437,9 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     % with idle closures.
     create_counter(Db),
     lists:foreach(fun(From) ->
-        Mon = couch_server_monitor:create(Db, element(1, From)),
+        Mon = couch_server_monitor:start(Db, element(1, From)),
         NewDb = Db#db{fd_monitor = Mon},
-        gen_server:reply(First, {ok, MonDb})
+        gen_server:reply(From, {ok, NewDb})
     end, Froms),
 
     % Cancel the creation request if it exists.
@@ -595,7 +600,12 @@ handle_info({'EXIT', Pid, Reason}, Server) ->
         end,
         true = ets:delete(?DBS, DbName),
         true = ets:delete(?PIDS, Pid),
-        delete_counter(Db),
+        % If instance_start_time isn't set then its
+        % an open_async pid that died which means there's
+        % no counter created yet.
+        if not is_binary(Db#db.instance_start_time) -> ok; true ->
+            delete_counter(Db)
+        end,
         {noreply, db_closed(Server, Db#db.options)};
     [] ->
         {noreply, Server}
@@ -619,12 +629,17 @@ db_closed(Server, Options) ->
     end.
 
 
-create_counter(#db{instance_start_time = IST} = Db) when is_binary(IST) ->
-    true = ets:insert(?COUNTERS, {{Db#db.name, IST}, 0}).
+create_counter(Db) ->
+    IsSysDb = couch_db:is_system_db(Db),
+    true = ets:insert(?COUNTERS, {counters_key(Db), 0, IsSysDb}).
 
 
-delete_counter(#db{instance_start_time = IST} = Db) when is_binary(IST) ->
-    true = ets:delete(?COUNTERS, {Db#db.name, IST}).
+delete_counter(Db) ->
+    true = ets:delete(?COUNTERS, counters_key(Db)).
+
+
+counters_key(#db{instance_start_time = IST} = Db) when is_binary(IST) ->
+    {Db#db.name, IST}.
 
 
 -ifdef(TEST).

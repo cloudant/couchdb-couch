@@ -16,7 +16,8 @@
 
 -export([
     create/1,
-    create/2,
+    start/2,
+    update/1,
     refresh/2,
     cancel/1
 ]).
@@ -39,8 +40,7 @@
 -record(st, {
     dbname,
     instance_start_time,
-    client,
-    is_sys_db
+    client
 }).
 
 
@@ -49,17 +49,14 @@
 -define(CANCEL_TIMEOUT, 5000).
 
 
-create(Db) ->
-    create(Db, self()).
-
-
-create(#db{name = DbName, fd = Fd, instance_start_time = IST} = Db, Client)
-        when is_binary(DbName), is_pid(Fd), is_binary(IST) ->
+create(#db{name = DbName, fd = Fd, instance_start_time = IST}) when
+        is_binary(DbName),
+        is_pid(Fd),
+        is_binary(IST) ->
     St = #st{
         dbname = DbName,
         instance_start_time = IST,
-        client = self(),
-        is_sys_db = couch_db:is_system_db(Db)
+        client = self()
     },
     #monitor{
         ref = erlang:monitor(process, Fd),
@@ -68,7 +65,33 @@ create(#db{name = DbName, fd = Fd, instance_start_time = IST} = Db, Client)
     }.
 
 
-refresh(#monitor{} = Monitor, Fd) ->
+% start/2 is a special case when couch_server creates the monitor
+% for a client. The client must then call update/1 on the monitor
+% it receives in its response from couch_server.
+start(#db{name = DbName, fd = Fd, instance_start_time = IST}, Client) when
+        is_binary(DbName),
+        is_pid(Fd),
+        is_binary(IST),
+        is_pid(Client) ->
+    St = #st{
+        dbname = DbName,
+        instance_start_time = IST,
+        client = Client
+    },
+    #monitor{
+        ref = Fd,
+        pid = spawn(?MODULE, init, [St]),
+        client = Client
+    }.
+
+
+update(#monitor{ref = Fd} = Monitor) when is_pid(Fd) ->
+    Monitor#monitor{
+        ref = erlang:monitor(process, Fd)
+    }.
+
+
+refresh(#monitor{ref = Ref} = Monitor, Fd) when is_reference(Ref) ->
     case Monitor#monitor.client == self() of
         true ->
             ok;
@@ -85,7 +108,7 @@ refresh(#monitor{} = Monitor, Fd) ->
     }.
 
 
-cancel(#monitor{} = Monitor) ->
+cancel(#monitor{ref = Ref} = Monitor) when is_reference(Ref) ->
     case Monitor#monitor.client == self() of
         true ->
             do_cancel(Monitor);
@@ -117,11 +140,10 @@ do_cancel(Monitor) ->
 init(St) ->
     erlang:monitor(process, St#st.client),
     ets:update_counter(?COUNTERS, key(St), {2, 1}),
-    erlang:hibernate(?MODULE, handle_msg, [NewSt]).
+    erlang:hibernate(?MODULE, handle_msg, [St]).
 
 
 terminate(St) ->
-    #st{is_sys_db = IsSysDb} = St,
     % We may have been delayed until after the databsae
     % was closed so ignore any errors here.
     catch ets:update_counter(?COUNTERS, key(St), {2, -1}).
