@@ -101,16 +101,12 @@ open(DbName, Options) ->
         Else -> Else
     end.
 
-reopen(#db{main_pid = Pid, fd = Fd, fd_monitor = OldRef, user_ctx = UserCtx}) ->
-    {ok, #db{fd = NewFd} = NewDb} = gen_server:call(Pid, get_db, infinity),
-    case NewFd =:= Fd of
-    true ->
-        {ok, NewDb#db{user_ctx = UserCtx}};
-    false ->
-        erlang:demonitor(OldRef, [flush]),
-        NewRef = erlang:monitor(process, NewFd),
-        {ok, NewDb#db{user_ctx = UserCtx, fd_monitor = NewRef}}
-    end.
+reopen(#db{main_pid = Pid, fd_monitor = Monitor, user_ctx = UserCtx}) ->
+    {ok, #db{} = NewDb} = gen_server:call(Pid, get_db, infinity),
+    {ok, NewDb#db{
+        user_ctx = UserCtx,
+        fd_monitor = Monitor
+    }}.
 
 is_system_db(#db{options = Options}) ->
     lists:member(sys_db, Options).
@@ -124,8 +120,8 @@ ensure_full_commit(Db, RequiredSeq) ->
     ok = gen_server:call(Pid, {full_commit, RequiredSeq}, infinity),
     {ok, StartTime}.
 
-close(#db{fd_monitor=Ref}) ->
-    erlang:demonitor(Ref, [flush]),
+close(#db{fd_monitor = Monitor}) when is_pid(Monitor) ->
+    couch_db_monitor:decref(Monitor),
     ok.
 
 is_idle(#db{compactor_pid=nil, waiting_delayed_commit=nil} = Db) ->
