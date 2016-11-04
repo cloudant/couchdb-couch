@@ -28,7 +28,9 @@
 -include_lib("couch/include/couch_db.hrl").
 
 -define(DBS, couch_dbs).
+-define(MONITORS, couch_dbs_monitors).
 -define(PIDS, couch_dbs_pid_to_name).
+-define(IDLE, couch_dbs_idle).
 
 -define(MAX_DBS_OPEN, 100).
 -define(RELISTEN_DELAY, 5000).
@@ -37,9 +39,7 @@
     root_dir = [],
     max_dbs_open=?MAX_DBS_OPEN,
     dbs_open=0,
-    start_time="",
-    update_lru_on_read=true,
-    lru = couch_lru:new()
+    start_time=""
     }).
 
 dev_start() ->
@@ -73,76 +73,26 @@ sup_start_link() ->
     gen_server:start_link({local, couch_server}, couch_server, [], []).
 
 
-open(DbName, Options0) ->
-    Options = maybe_add_sys_db_callbacks(DbName, Options0),
-    Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
+open(DbName, Options) ->
+    Timeout = couch_util:get_value(timeout, Options, infinity),
     case ets:lookup(?DBS, DbName) of
-    [#db{fd=Fd, fd_monitor=Lock} = Db] when Lock =/= locked ->
-        update_lru(DbName, Options),
-        {ok, Db#db{user_ctx=Ctx, fd_monitor=erlang:monitor(process,Fd)}};
-    _ ->
-        Timeout = couch_util:get_value(timeout, Options, infinity),
-        Create = couch_util:get_value(create_if_missing, Options, false),
-        case gen_server:call(couch_server, {open, DbName, Options}, Timeout) of
-        {ok, #db{fd=Fd} = Db} ->
-            update_lru(DbName, Options),
-            {ok, Db#db{user_ctx=Ctx, fd_monitor=erlang:monitor(process,Fd)}};
-        {not_found, no_db_file} when Create ->
-            couch_log:warning("creating missing database: ~s", [DbName]),
-            couch_server:create(DbName, Options);
-        Error ->
-            Error
-        end
+        [{DbName, Monitor}] ->
+            case couch_db_monitor:open_db(Monitor, Options) of
+                noproc ->
+                    gen_server:call(?MODULE, {open, DbName, Options}, Timeout);
+                Else ->
+                    Else
+            end;
+        [] ->
+            gen_server:call(?MODULE, {open, DbName, Options}, Timeout)
     end.
 
-update_lru(DbName, Options) ->
-    case lists:member(sys_db, Options) of
-        false -> gen_server:cast(couch_server, {update_lru, DbName});
-        true -> ok
-    end.
 
-close_lru() ->
-    gen_server:call(couch_server, close_lru).
-
-create(DbName, Options0) ->
-    Options = maybe_add_sys_db_callbacks(DbName, Options0),
-    case gen_server:call(couch_server, {create, DbName, Options}, infinity) of
-    {ok, #db{fd=Fd} = Db} ->
-        Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
-        {ok, Db#db{user_ctx=Ctx, fd_monitor=erlang:monitor(process,Fd)}};
-    Error ->
-        Error
-    end.
+create(DbName, Options) ->
+    gen_server:call(couch_server, {create, DbName, Options}, infinity).
 
 delete(DbName, Options) ->
     gen_server:call(couch_server, {delete, DbName, Options}, infinity).
-
-maybe_add_sys_db_callbacks(DbName, Options) when is_binary(DbName) ->
-    maybe_add_sys_db_callbacks(?b2l(DbName), Options);
-maybe_add_sys_db_callbacks(DbName, Options) ->
-    DbsDbName = config:get("mem3", "shards_db", "_dbs"),
-    NodesDbName = config:get("mem3", "nodes_db", "_nodes"),
-
-    IsReplicatorDb = path_ends_with(DbName, "_replicator"),
-    UsersDbSuffix = config:get("couchdb", "users_db_suffix", "_users"),
-    IsUsersDb = path_ends_with(DbName, "_users")
-        orelse path_ends_with(DbName, UsersDbSuffix),
-    if
-	DbName == DbsDbName ->
-	    [sys_db | Options];
-	DbName == NodesDbName ->
-	    [sys_db | Options];
-	IsReplicatorDb ->
-	    [{before_doc_update, fun couch_replicator_manager:before_doc_update/2},
-	     {after_doc_read, fun couch_replicator_manager:after_doc_read/2},
-	     sys_db | Options];
-	IsUsersDb ->
-	    [{before_doc_update, fun couch_users_db:before_doc_update/2},
-	     {after_doc_read, fun couch_users_db:after_doc_read/2},
-	     sys_db | Options];
-	true ->
-	    Options
-    end.
 
 path_ends_with(Path, Suffix) when is_binary(Suffix) ->
     Suffix =:= couch_db:dbname_suffix(Path);
@@ -186,17 +136,15 @@ init([]) ->
     RootDir = config:get("couchdb", "database_dir", "."),
     MaxDbsOpen = list_to_integer(
             config:get("couchdb", "max_dbs_open", integer_to_list(?MAX_DBS_OPEN))),
-    UpdateLruOnRead =
-        config:get("couchdb", "update_lru_on_read", "true") =:= "true",
     ok = config:listen_for_changes(?MODULE, nil),
     ok = couch_file:init_delete_dir(RootDir),
     hash_admin_passwords(),
-    ets:new(?DBS, [set, protected, named_table, {keypos, #db.name}]),
+    ets:new(?DBS, [set, protected, named_table]),
     ets:new(?PIDS, [set, protected, named_table]),
+    ets:new(?IDLE, [set, public, named_table]),
     process_flag(trap_exit, true),
     {ok, #server{root_dir=RootDir,
                 max_dbs_open=MaxDbsOpen,
-                update_lru_on_read=UpdateLruOnRead,
                 start_time=couch_util:rfc1123_date()}}.
 
 terminate(Reason, Srv) ->
@@ -277,57 +225,47 @@ all_databases(Fun, Acc0) ->
 
 make_room(Server, Options) ->
     case lists:member(sys_db, Options) of
-        false -> maybe_close_lru_db(Server);
+        false -> maybe_close_idle_db(Server);
         true -> {ok, Server}
     end.
 
-maybe_close_lru_db(#server{dbs_open=NumOpen, max_dbs_open=MaxOpen}=Server)
-        when NumOpen < MaxOpen ->
+
+maybe_close_idle_db(#server{dbs_open = Open, max_dbs_open = Max} = Server)
+        when Open < Max ->
     {ok, Server};
-maybe_close_lru_db(#server{lru=Lru}=Server) ->
+maybe_close_idle_db(Server) ->
     try
-        {ok, db_closed(Server#server{lru = couch_lru:close(Lru)}, [])}
+        close_idle_db(),
+        {ok, db_closed(Server, [])}
     catch error:all_dbs_active ->
         {error, all_dbs_active}
     end.
 
-open_async(Server, From, DbName, Filepath, Options) ->
-    Parent = self(),
-    T0 = os:timestamp(),
-    Opener = spawn_link(fun() ->
-        Res = couch_db:start_link(DbName, Filepath, Options),
-        case {Res, lists:member(create, Options)} of
-            {{ok, _Db}, true} ->
-                couch_event:notify(DbName, created);
-            _ ->
-                ok
-        end,
-        gen_server:call(Parent, {open_result, T0, DbName, Res}, infinity),
-        unlink(Parent)
-    end),
-    ReqType = case lists:member(create, Options) of
-        true -> create;
-        false -> open
-    end,
-    % icky hack of field values - compactor_pid used to store clients
-    % and fd used for opening request info
-    true = ets:insert(?DBS, #db{
-        name = DbName,
-        fd = ReqType,
-        main_pid = Opener,
-        compactor_pid = [From],
-        fd_monitor = locked,
-        options = Options
-    }),
-    true = ets:insert(?PIDS, {Opener, DbName}),
-    db_opened(Server, Options).
 
-handle_call(close_lru, _From, #server{lru=Lru} = Server) ->
+close_idle_db() ->
+    ets:safe_fixtable(?IDLE, true),
     try
-        {reply, ok, db_closed(Server#server{lru = couch_lru:close(Lru)}, [])}
-    catch error:all_dbs_active ->
-        {reply, {error, all_dbs_active}, Server}
-    end;
+        close_idle_db(ets:first(?IDLE))
+    after
+        ets:safe_fixtable(?IDLE, false)
+    end.
+
+
+close_idle_db('$end_of_table') ->
+    erlang:error(all_dbs_active);
+
+close_idle_db(DbName) when is_binary(DbName) ->
+    [{DbName, MonitorPid}] = ets:lookup(?DBS, DbName),
+    case couch_db_monitor:close(MonitorPid) of
+        ok ->
+            true = ets:delete(?DBS, DbName),
+            true = ets:delete(?PIDS, MonitorPid),
+            true = ets:delete(?IDLE, DbName);
+        not_idle ->
+            close_idle_db(ets:next(?IDLE, DbName))
+    end.
+
+
 handle_call(open_dbs_count, _From, Server) ->
     {reply, Server#server.dbs_open, Server};
 handle_call({set_update_lru_on_read, UpdateOnRead}, _From, Server) ->
@@ -336,169 +274,62 @@ handle_call({set_max_dbs_open, Max}, _From, Server) ->
     {reply, ok, Server#server{max_dbs_open=Max}};
 handle_call(get_server, _From, Server) ->
     {reply, {ok, Server}, Server};
-handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
-    link(Db#db.main_pid),
-    true = ets:delete(?PIDS, FromPid),
-    OpenTime = timer:now_diff(os:timestamp(), T0) / 1000,
-    couch_stats:update_histogram([couchdb, db_open_time], OpenTime),
-    % icky hack of field values - compactor_pid used to store clients
-    % and fd used to possibly store a creation request
-    [#db{fd=ReqType, compactor_pid=Froms}] = ets:lookup(?DBS, DbName),
-    [gen_server:reply(From, {ok, Db}) || From <- Froms],
-    % Cancel the creation request if it exists.
-    case ReqType of
-        {create, DbName, _Filepath, _Options, CrFrom} ->
-            gen_server:reply(CrFrom, file_exists);
-        _ ->
-            ok
-    end,
-    true = ets:insert(?DBS, Db),
-    true = ets:insert(?PIDS, {Db#db.main_pid, DbName}),
-    Lru = case couch_db:is_system_db(Db) of
-        false ->
-            couch_lru:insert(DbName, Server#server.lru);
-        true ->
-            Server#server.lru
-    end,
-    {reply, ok, Server#server{lru = Lru}};
-handle_call({open_result, T0, DbName, {error, eexist}}, From, Server) ->
-    handle_call({open_result, T0, DbName, file_exists}, From, Server);
-handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
-    % icky hack of field values - compactor_pid used to store clients
-    [#db{fd=ReqType, compactor_pid=Froms}=Db] = ets:lookup(?DBS, DbName),
-    [gen_server:reply(From, Error) || From <- Froms],
-    couch_log:info("open_result error ~p for ~s", [Error, DbName]),
-    true = ets:delete(?DBS, DbName),
-    true = ets:delete(?PIDS, FromPid),
-    NewServer = case ReqType of
-        {create, DbName, Filepath, Options, CrFrom} ->
-            open_async(Server, CrFrom, DbName, Filepath, Options);
-        _ ->
-            Server
-    end,
-    {reply, ok, db_closed(NewServer, Db#db.options)};
-handle_call({open, DbName, Options}, From, Server) ->
+handle_call({Action, DbName, Options} = Req, From, Server) ->
+        when Action == open; Action == create ->
     case ets:lookup(?DBS, DbName) of
-    [] ->
-        DbNameList = binary_to_list(DbName),
-        case check_dbname(Server, DbNameList) of
+        [{DbName, Monitor}] ->
+            case couch_db_monitor:forward(Monitor, From, {Action, Options}) of
+                ok ->
+                    {noreply, Server};
+                noproc ->
+                    create_monitor(Action, DbName, Options, From, Server)
+            end;
+        [] ->
+            create_monitor(Action, DbName, Options, From, Server)
+
+    end;
+handle_call({delete, DbName, Options}, _From, Server) ->
+    #server{
+        root_dir = RootDir
+    } = Server,
+    DbNameList = binary_to_list(DbName),
+    case check_dbname(Server, DbNameList) of
         ok ->
-            case make_room(Server, Options) of
-            {ok, Server2} ->
-                Filepath = get_full_filename(Server, DbNameList),
-                {noreply, open_async(Server2, From, DbName, Filepath, Options)};
-            CloseError ->
-                {reply, CloseError, Server}
+            FullFilepath = get_full_filename(Server, DbNameList),
+            Server2 = case ets:lookup(?DBS, DbName) of
+                [] ->
+                    Server;
+                [{DbName, MonitorPid}] ->
+                    ok = couch_db_monitor:close(MonitorPid),
+                    true = ets:delete(?DBS, DbName),
+                    true = ets:delete(?PIDS, MonitorPid),
+                    true = ets:delete(?IDLE, DbName),
+                    db_closed(Server)
+            end;
+
+            %% Delete any leftover compaction files. If we don't do this a
+            %% subsequent request for this DB will try to open them to use
+            %% as a recovery.
+            lists:foreach(fun(Ext) ->
+                couch_file:delete(RootDir, FullFilepath ++ Ext)
+            end, [".compact", ".compact.data", ".compact.meta"]),
+
+            couch_db_plugin:on_delete(DbName, Options),
+
+            DelOpt = [{context, delete} | Options],
+            case couch_file:delete(RootDir, FullFilepath, DelOpt) of
+                ok ->
+                    couch_event:notify(DbName, deleted),
+                    {reply, ok, Server2};
+                {error, enoent} ->
+                    {reply, not_found, Server2};
+                Else ->
+                    {reply, Else, Server2}
             end;
         Error ->
             {reply, Error, Server}
-        end;
-    [#db{compactor_pid = Froms} = Db] when is_list(Froms) ->
-        % icky hack of field values - compactor_pid used to store clients
-        true = ets:insert(?DBS, Db#db{compactor_pid = [From|Froms]}),
-        if length(Froms) =< 10 -> ok; true ->
-            Fmt = "~b clients waiting to open db ~s",
-            couch_log:info(Fmt, [length(Froms), DbName])
-        end,
-        {noreply, Server};
-    [#db{} = Db] ->
-        {reply, {ok, Db}, Server}
-    end;
-handle_call({create, DbName, Options}, From, Server) ->
-    DbNameList = binary_to_list(DbName),
-    Filepath = get_full_filename(Server, DbNameList),
-    case check_dbname(Server, DbNameList) of
-    ok ->
-        case ets:lookup(?DBS, DbName) of
-        [] ->
-            case make_room(Server, Options) of
-            {ok, Server2} ->
-                {noreply, open_async(Server2, From, DbName, Filepath,
-                        [create | Options])};
-            CloseError ->
-                {reply, CloseError, Server}
-            end;
-        [#db{fd=open}=Db] ->
-            % We're trying to create a database while someone is in
-            % the middle of trying to open it. We allow one creator
-            % to wait while we figure out if it'll succeed.
-            % icky hack of field values - fd used to store create request
-            CrOptions = [create | Options],
-            NewDb = Db#db{fd={create, DbName, Filepath, CrOptions, From}},
-            true = ets:insert(?DBS, NewDb),
-            {noreply, Server};
-        [_AlreadyRunningDb] ->
-            {reply, file_exists, Server}
-        end;
-    Error ->
-        {reply, Error, Server}
-    end;
-handle_call({delete, DbName, Options}, _From, Server) ->
-    DbNameList = binary_to_list(DbName),
-    case check_dbname(Server, DbNameList) of
-    ok ->
-        FullFilepath = get_full_filename(Server, DbNameList),
-        Server2 =
-        case ets:lookup(?DBS, DbName) of
-        [] -> Server;
-        [#db{main_pid=Pid, compactor_pid=Froms} = Db] when is_list(Froms) ->
-            % icky hack of field values - compactor_pid used to store clients
-            true = ets:delete(?DBS, DbName),
-            true = ets:delete(?PIDS, Pid),
-            exit(Pid, kill),
-            [gen_server:reply(F, not_found) || F <- Froms],
-            db_closed(Server, Db#db.options);
-        [#db{main_pid=Pid} = Db] ->
-            true = ets:delete(?DBS, DbName),
-            true = ets:delete(?PIDS, Pid),
-            exit(Pid, kill),
-            db_closed(Server, Db#db.options)
-        end,
+    end.
 
-        %% Delete any leftover compaction files. If we don't do this a
-        %% subsequent request for this DB will try to open them to use
-        %% as a recovery.
-        lists:foreach(fun(Ext) ->
-            couch_file:delete(Server#server.root_dir, FullFilepath ++ Ext)
-        end, [".compact", ".compact.data", ".compact.meta"]),
-        couch_file:delete(Server#server.root_dir, FullFilepath ++ ".compact"),
-
-        couch_db_plugin:on_delete(DbName, Options),
-
-        DelOpt = [{context, delete} | Options],
-        case couch_file:delete(Server#server.root_dir, FullFilepath, DelOpt) of
-        ok ->
-            couch_event:notify(DbName, deleted),
-            {reply, ok, Server2};
-        {error, enoent} ->
-            {reply, not_found, Server2};
-        Else ->
-            {reply, Else, Server2}
-        end;
-    Error ->
-        {reply, Error, Server}
-    end;
-handle_call({db_updated, #db{}=Db}, _From, Server0) ->
-    #db{name = DbName, instance_start_time = StartTime} = Db,
-    Server = try ets:lookup_element(?DBS, DbName, #db.instance_start_time) of
-        StartTime ->
-            true = ets:insert(?DBS, Db),
-            Lru = case couch_db:is_system_db(Db) of
-                false -> couch_lru:update(DbName, Server0#server.lru);
-                true -> Server0#server.lru
-            end,
-            Server0#server{lru = Lru};
-        _ ->
-            Server0
-    catch _:_ ->
-        Server0
-    end,
-    {reply, ok, Server}.
-
-handle_cast({update_lru, DbName}, #server{lru = Lru, update_lru_on_read=true} = Server) ->
-    {noreply, Server#server{lru = couch_lru:update(DbName, Lru)}};
-handle_cast({update_lru, _DbName}, Server) ->
-    {noreply, Server};
 handle_cast(Msg, Server) ->
     {stop, {unknown_cast_message, Msg}, Server}.
 
@@ -509,31 +340,38 @@ handle_info({'EXIT', _Pid, config_change}, Server) ->
     {stop, config_change, Server};
 handle_info({'EXIT', Pid, Reason}, Server) ->
     case ets:lookup(?PIDS, Pid) of
-    [{Pid, DbName}] ->
-        [#db{compactor_pid=Froms}=Db] = ets:lookup(?DBS, DbName),
-        if Reason /= snappy_nif_not_loaded -> ok; true ->
-            Msg = io_lib:format("To open the database `~s`, Apache CouchDB "
-                "must be built with Erlang OTP R13B04 or higher.", [DbName]),
-            couch_log:error(Msg, [])
-        end,
-        couch_log:info("db ~s died with reason ~p", [DbName, Reason]),
-        % icky hack of field values - compactor_pid used to store clients
-        if is_list(Froms) ->
-            [gen_server:reply(From, Reason) || From <- Froms];
-        true ->
-            ok
-        end,
-        true = ets:delete(?DBS, DbName),
-        true = ets:delete(?PIDS, Pid),
-        {noreply, db_closed(Server, Db#db.options)};
-    [] ->
-        {noreply, Server}
+        [{Pid, DbName}] ->
+            [{DbName, Pid, Options}] = ets:lookup(?DBS, DbName),
+            true = ets:delete(?DBS, DbName),
+            true = ets:delete(?PIDS, Pid),
+            true = ets:delete(?IDLE, DbName),
+            {noreply, db_closed(Server, Options)};
+        [] ->
+            Msg = "Monitor ~p failed to exit cleanly: ~r",
+            couch_log:error(Msg, [Pid, Reason])
     end;
 handle_info(restart_config_listener, State) ->
     ok = config:listen_for_changes(?MODULE, nil),
     {noreply, State};
 handle_info(Info, Server) ->
     {stop, {unknown_message, Info}, Server}.
+
+
+create_monitor(Action, DbName, Options, Action, Server) ->
+    #server{
+        root_dir = RootDir
+    } = Server,
+    case make_room(Server, Options) of
+        {ok, Server2} ->
+            {ok, Monitor} = couch_db_monitor:start_link(RootDir, DbName),
+            true = ets:insert_new(?DBS, {DbName, Monitor}),
+            true = ets:insert_new(?PIDS, {Monitor, DbName}),
+            ok = couch_db_monitor:forward(Monitor, From, {Action, Options}),
+            {noreply, Server2};
+        Error ->
+            {reply, Error, Server}
+    end.
+
 
 db_opened(Server, Options) ->
     case lists:member(sys_db, Options) of
