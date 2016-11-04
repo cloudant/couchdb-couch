@@ -246,7 +246,12 @@ couchdb_1138(DbName) ->
 
         ?assert(is_process_alive(IndexerPid)),
 
+        % Get fd before compaction so we can kill it
+        % rather than wait for the 60s timeout for it
+        % to die on its own.
+        PreCompactFd = get_db_fd(DbName),
         compact_db(DbName),
+        couch_file:close(PreCompactFd),
         ?assert(is_process_alive(IndexerPid)),
 
         compact_view_group(DbName, "foo"),
@@ -530,7 +535,11 @@ count_users(DbName) ->
     {ok, Db} = couch_db:open_int(DbName, [?ADMIN_CTX]),
     {monitored_by, Monitors} = erlang:process_info(Db#db.main_pid, monitored_by),
     ok = couch_db:close(Db),
-    length(lists:usort(Monitors) -- [self()]).
+    % Account for the new couch_db_monitor pid
+    % that monitors the main_pid as well
+    MonitorPid = element(2, Db#db.fd_monitor),
+    KnownMonitors = [self(), Db#db.fd, MonitorPid],
+    length(lists:usort(Monitors) -- KnownMonitors).
 
 count_index_files(DbName) ->
     % call server to fetch the index files
@@ -559,6 +568,11 @@ restore_backup_db_file(DbName) ->
     ok = file:delete(DbFile),
     ok = file:rename(DbFile ++ ".backup", DbFile),
     ok.
+
+get_db_fd(DbName) ->
+    {ok, Db} = couch_db:open_int(DbName, []),
+    couch_db:close(Db),
+    Db#db.fd.
 
 compact_db(DbName) ->
     {ok, Db} = couch_db:open_int(DbName, []),
