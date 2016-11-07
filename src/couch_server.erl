@@ -28,7 +28,6 @@
 
 -define(DBS, couch_dbs).
 -define(PIDS, couch_dbs_pid_to_name).
--define(MONITORS, couch_dbs_monitors).
 -define(IDLE, couch_dbs_idle).
 
 -define(MAX_DBS_OPEN, 100).
@@ -41,6 +40,15 @@
     dbs_open=0,
     start_time=""
     }).
+
+-record(entry, {
+    dbname,
+    db,
+    monitor,
+    status,
+    req_type,
+    waiters = []
+}).
 
 dev_start() ->
     couch:stop(),
@@ -82,11 +90,14 @@ open(_DbName, _Options, 0) ->
 open(DbName, Options0, RetryCount) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
     Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
-    case ets:lookup(?MONITORS, DbName) of
-    [{DbName, Monitor, active}] ->
+    case ets:lookup(?DBS, DbName) of
+    [#entry{status = active} = Entry] ->
+        #entry{
+            db = Db,
+            monitor = Monitor
+        } = Entry,
         case couch_db_monitor:incref(Monitor) of
             ok ->
-                [#db{} = Db] = ets:lookup(?DBS, DbName),
                 {ok, Db#db{
                     user_ctx = Ctx,
                     fd_monitor = Monitor
@@ -193,9 +204,8 @@ init([]) ->
     ok = config:listen_for_changes(?MODULE, nil),
     ok = couch_file:init_delete_dir(RootDir),
     hash_admin_passwords(),
-    ets:new(?DBS, [set, protected, named_table, {keypos, #db.name}]),
+    ets:new(?DBS, [set, protected, named_table, {keypos, #entry.dbname}]),
     ets:new(?PIDS, [set, protected, named_table]),
-    ets:new(?MONITORS, [set, protected, named_table]),
     ets:new(?IDLE, [set, public, named_table]),
     process_flag(trap_exit, true),
     {ok, #server{root_dir=RootDir,
@@ -305,21 +315,26 @@ close_idle_db('$end_of_table') ->
     erlang:error(all_dbs_active);
 
 close_idle_db(DbName) when is_binary(DbName) ->
-    [{DbName, Monitor, active}] = ets:lookup(?MONITORS, DbName),
+    [#entry{status = active} = Entry] = ets:lookup(?DBS, DbName),
+    #entry{
+        db = Db,
+        monitor = Monitor
+    } = Entry,
     % Turn off messages to the monitor so that we
     % know that no more clients will send requests
     % to it
-    true = ets:insert(?MONITORS, {DbName, Monitor, inactive}),
+    true = ets:update_element(?DBS, DbName, {#entry.status, inactive}),
+    % TODO: Need to change this to something like "close_if_idle"
+    % so that the monitor will tell any new clients to retry before
+    % exiting when it gets the 'DOWN' message from Db#db.main_pid
     case couch_db_monitor:is_idle(Monitor) of
         true ->
-            [#db{} = Db] = ets:lookup(?DBS, DbName),
             exit(Db#db.main_pid, kill),
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, Db#db.main_pid),
-            true = ets:delete(?MONITORS, DbName),
             true = ets:delete(?IDLE, DbName);
         false ->
-            true = ets:insert(?MONITORS, {DbName, Monitor, active}),
+            true = ets:update_element(?DBS, DbName, {#entry.status, active}),
             close_idle_db(ets:next(?IDLE, DbName))
     end.
 
@@ -351,18 +366,22 @@ open_async(Server, From, DbName, Options) ->
     end,
     % icky hack of field values - compactor_pid used to store clients
     % and fd used for opening request info
-    true = ets:insert(?DBS, #db{
-        name = DbName,
-        fd = ReqType,
-        main_pid = Opener,
-        compactor_pid = [From],
-        fd_monitor = locked,
-        options = Options
-    }),
-    true = ets:insert(?PIDS, {Opener, DbName}),
     IsSysDb = lists:member(sys_db, Options),
     {ok, Monitor} = couch_db_monitor:start_link(DbName, IsSysDb),
-    true = ets:insert(?MONITORS, {DbName, Monitor, inactive}),
+    Entry = #entry{
+        dbname = DbName,
+        db = #db{
+            name = DbName,
+            main_pid = Opener,
+            options = Options
+        },
+        monitor = Monitor,
+        status = inactive,
+        req_type = ReqType,
+        waiters = [From]
+    },
+    true = ets:insert(?DBS, Entry),
+    true = ets:insert(?PIDS, {Opener, DbName}),
     db_opened(Server, Options).
 
 handle_call(open_dbs_count, _From, Server) ->
@@ -378,12 +397,17 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     couch_stats:update_histogram([couchdb, db_open_time], OpenTime),
     % icky hack of field values - compactor_pid used to store clients
     % and fd used to possibly store a creation request
-    [#db{fd=ReqType, compactor_pid=Froms}] = ets:lookup(?DBS, DbName),
-    [{DbName, Monitor, inactive}] = ets:lookup(?MONITORS, DbName),
+    [#entry{status = inactive} = Entry] = ets:lookup(?DBS, DbName),
+    #entry{
+        monitor = Monitor,
+        req_type = ReqType,
+        waiters = Waiters
+    } = Entry,
+    ok = couch_db_monitor:set_db_pid(Monitor, Db#db.main_pid),
     lists:foreach(fun(From) ->
         ok = couch_db_monitor:incref(Monitor, From),
         gen_server:reply(From, {ok, Db#db{fd_monitor = Monitor}})
-    end, Froms),
+    end, Waiters),
     % Cancel the creation request if it exists.
     case ReqType of
         {create, DbName, _Options, CrFrom} ->
@@ -391,24 +415,31 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
         _ ->
             ok
     end,
-    true = ets:insert(?DBS, Db),
+    NewEntry = Entry#entry{
+        db = Db,
+        status = active,
+        req_type = undefined,
+        waiters = undefined
+    },
+    true = ets:insert(?DBS, NewEntry),
     true = ets:insert(?PIDS, {Db#db.main_pid, DbName}),
-    [{DbName, Monitor, inactive}] = ets:lookup(?MONITORS, DbName),
-    couch_db_monitor:set_db_pid(Monitor, Db#db.main_pid),
-    true = ets:insert(?MONITORS, {DbName, Monitor, active}),
     {reply, ok, Server};
 handle_call({open_result, T0, DbName, {error, eexist}}, From, Server) ->
     handle_call({open_result, T0, DbName, file_exists}, From, Server);
 handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
     % icky hack of field values - compactor_pid used to store clients
-    [#db{fd=ReqType, compactor_pid=Froms}=Db] = ets:lookup(?DBS, DbName),
-    [gen_server:reply(From, Error) || From <- Froms],
-    [{DbName, Monitor, inactive}] = ets:lookup(?MONITORS, DbName),
-    couch_db_monitor:exit(Monitor),
+    [#entry{status = inactive} = Entry] = ets:lookup(?DBS, DbName),
+    #entry{
+        db = Db,
+        monitor = Monitor,
+        req_type = ReqType,
+        waiters = Waiters
+    } = Entry,
+    [gen_server:reply(From, Error) || From <- Waiters],
+    ok = couch_db_monitor:exit(Monitor),
     couch_log:info("open_result error ~p for ~s", [Error, DbName]),
     true = ets:delete(?DBS, DbName),
     true = ets:delete(?PIDS, FromPid),
-    true = ets:delete(?MONITORS, DbName),
     true = ets:delete(?IDLE, DbName),
     NewServer = case ReqType of
         {create, DbName, Options, CrFrom} ->
@@ -426,16 +457,24 @@ handle_call({open, DbName, Options}, From, Server) ->
         CloseError ->
             {reply, CloseError, Server}
         end;
-    [#db{compactor_pid = Froms} = Db] when is_list(Froms) ->
-        % icky hack of field values - compactor_pid used to store clients
-        true = ets:insert(?DBS, Db#db{compactor_pid = [From|Froms]}),
-        if length(Froms) =< 10 -> ok; true ->
+    [#entry{status = inactive} = Entry] ->
+        #entry{
+            waiters = Waiters
+        } = Entry,
+        NewEntry = Entry#entry{
+            waiters = [From | Waiters]
+        },
+        true = ets:insert(?DBS, NewEntry),
+        if length(Waiters) =< 10 -> ok; true ->
             Fmt = "~b clients waiting to open db ~s",
-            couch_log:info(Fmt, [length(Froms), DbName])
+            couch_log:info(Fmt, [length(Waiters) + 1, DbName])
         end,
         {noreply, Server};
-    [#db{} = Db] ->
-        [{DbName, Monitor, active}] = ets:lookup(?MONITORS, DbName),
+    [#entry{status = active} = Entry] ->
+        #entry{
+            db = Db,
+            monitor = Monitor
+        } = Entry,
         ok = couch_db_monitor:incref(Monitor, From),
         {reply, {ok, Db#db{fd_monitor = Monitor}}, Server}
     end;
@@ -448,16 +487,18 @@ handle_call({create, DbName, Options}, From, Server) ->
         CloseError ->
             {reply, CloseError, Server}
         end;
-    [#db{fd=open}=Db] ->
+    [#entry{status = inactive, req_type = open} = Entry] ->
         % We're trying to create a database while someone is in
         % the middle of trying to open it. We allow one creator
         % to wait while we figure out if it'll succeed.
         % icky hack of field values - fd used to store create request
         CrOptions = [create | Options],
-        NewDb = Db#db{fd={create, DbName, CrOptions, From}},
-        true = ets:insert(?DBS, NewDb),
+        NewEntry = Entry#entry{
+            req_type = {create, DbName, CrOptions, From}
+        },
+        true = ets:insert(?DBS, NewEntry),
         {noreply, Server};
-    [_AlreadyRunningDb] ->
+    [#entry{status = active}] ->
         {reply, file_exists, Server}
     end;
 handle_call({delete, DbName, Options}, _From, Server) ->
@@ -468,21 +509,18 @@ handle_call({delete, DbName, Options}, _From, Server) ->
         Server2 =
         case ets:lookup(?DBS, DbName) of
         [] -> Server;
-        [#db{main_pid=Pid, compactor_pid=Froms} = Db] when is_list(Froms) ->
-            % icky hack of field values - compactor_pid used to store clients
+        [#entry{waiters = Waiters} = Entry] ->
+            #entry{
+                db = Db,
+                waiters = Waiters
+            } = Entry,
             true = ets:delete(?DBS, DbName),
-            true = ets:delete(?PIDS, Pid),
-            true = ets:delete(?MONITORS, DbName),
+            true = ets:delete(?PIDS, Db#db.main_pid),
             true = ets:delete(?IDLE, DbName),
-            exit(Pid, kill),
-            [gen_server:reply(F, not_found) || F <- Froms],
-            db_closed(Server, Db#db.options);
-        [#db{main_pid=Pid} = Db] ->
-            true = ets:delete(?DBS, DbName),
-            true = ets:delete(?PIDS, Pid),
-            true = ets:delete(?MONITORS, DbName),
-            true = ets:delete(?IDLE, DbName),
-            exit(Pid, kill),
+            exit(Db#db.main_pid, kill),
+            if not is_list(Waiters) -> ok; true ->
+                [gen_server:reply(F, not_found) || F <- Waiters]
+            end,
             db_closed(Server, Db#db.options)
         end,
 
@@ -511,9 +549,14 @@ handle_call({delete, DbName, Options}, _From, Server) ->
     end;
 handle_call({db_updated, #db{}=Db}, _From, Server) ->
     #db{name = DbName, instance_start_time = StartTime} = Db,
-    try ets:lookup_element(?DBS, DbName, #db.instance_start_time) of
-        StartTime ->
-            true = ets:insert(?DBS, Db);
+    try ets:lookup(?DBS, DbName) of
+        [#entry{status = active} = Entry] ->
+            #entry{
+                db = CurrDb
+            } = Entry,
+            if StartTime /= CurrDb#db.instance_start_time -> ok; true ->
+                true = ets:update_element(?DBS, DbName, {#entry.db, Db})
+            end;
         _ ->
             ok
     catch _:_ ->
@@ -532,7 +575,7 @@ handle_info({'EXIT', _Pid, config_change}, Server) ->
 handle_info({'EXIT', Pid, Reason}, Server) ->
     case ets:lookup(?PIDS, Pid) of
     [{Pid, DbName}] ->
-        [#db{compactor_pid=Froms}=Db] = ets:lookup(?DBS, DbName),
+        [#entry{db = Db, waiters = Waiters}] = ets:lookup(?DBS, DbName),
         if Reason /= snappy_nif_not_loaded -> ok; true ->
             Msg = io_lib:format("To open the database `~s`, Apache CouchDB "
                 "must be built with Erlang OTP R13B04 or higher.", [DbName]),
@@ -540,14 +583,11 @@ handle_info({'EXIT', Pid, Reason}, Server) ->
         end,
         couch_log:info("db ~s died with reason ~p", [DbName, Reason]),
         % icky hack of field values - compactor_pid used to store clients
-        if is_list(Froms) ->
-            [gen_server:reply(From, Reason) || From <- Froms];
-        true ->
-            ok
+        if not is_list(Waiters) -> ok; true ->
+            [gen_server:reply(From, Reason) || From <- Waiters]
         end,
         true = ets:delete(?DBS, DbName),
         true = ets:delete(?PIDS, Pid),
-        true = ets:delete(?MONITORS, DbName),
         true = ets:delete(?IDLE, DbName),
         {noreply, db_closed(Server, Db#db.options)};
     [] ->
