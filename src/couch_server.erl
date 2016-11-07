@@ -323,18 +323,26 @@ close_idle_db(DbName) when is_binary(DbName) ->
             close_idle_db(ets:next(?IDLE, DbName))
     end.
 
-open_async(Server, From, DbName, Filepath, Options) ->
+open_async(Server, From, DbName, Options) ->
     Parent = self(),
     T0 = os:timestamp(),
     Opener = spawn_link(fun() ->
-        Res = couch_db:start_link(DbName, Filepath, Options),
-        case {Res, lists:member(create, Options)} of
-            {{ok, _Db}, true} ->
-                couch_event:notify(DbName, created);
-            _ ->
-                ok
+        Result = case check_dbname(Server, DbName) of
+            ok ->
+                DbNameList = binary_to_list(DbName),
+                Filepath = get_full_filename(Server, DbNameList),
+                Res = couch_db:start_link(DbName, Filepath, Options),
+                case {Res, lists:member(create, Options)} of
+                    {{ok, _Db}, true} ->
+                        couch_event:notify(DbName, created);
+                    _ ->
+                        ok
+                end,
+                Res;
+            Error ->
+                Error
         end,
-        gen_server:call(Parent, {open_result, T0, DbName, Res}, infinity),
+        gen_server:call(Parent, {open_result, T0, DbName, Result}, infinity),
         unlink(Parent)
     end),
     ReqType = case lists:member(create, Options) of
@@ -378,7 +386,7 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     end, Froms),
     % Cancel the creation request if it exists.
     case ReqType of
-        {create, DbName, _Filepath, _Options, CrFrom} ->
+        {create, DbName, _Options, CrFrom} ->
             gen_server:reply(CrFrom, file_exists);
         _ ->
             ok
@@ -403,8 +411,8 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
     true = ets:delete(?MONITORS, DbName),
     true = ets:delete(?IDLE, DbName),
     NewServer = case ReqType of
-        {create, DbName, Filepath, Options, CrFrom} ->
-            open_async(Server, CrFrom, DbName, Filepath, Options);
+        {create, DbName, Options, CrFrom} ->
+            open_async(Server, CrFrom, DbName, Options);
         _ ->
             Server
     end,
@@ -412,18 +420,11 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
 handle_call({open, DbName, Options}, From, Server) ->
     case ets:lookup(?DBS, DbName) of
     [] ->
-        DbNameList = binary_to_list(DbName),
-        case check_dbname(Server, DbNameList) of
-        ok ->
-            case make_room(Server, Options) of
-            {ok, Server2} ->
-                Filepath = get_full_filename(Server, DbNameList),
-                {noreply, open_async(Server2, From, DbName, Filepath, Options)};
-            CloseError ->
-                {reply, CloseError, Server}
-            end;
-        Error ->
-            {reply, Error, Server}
+        case make_room(Server, Options) of
+        {ok, Server2} ->
+            {noreply, open_async(Server2, From, DbName, Options)};
+        CloseError ->
+            {reply, CloseError, Server}
         end;
     [#db{compactor_pid = Froms} = Db] when is_list(Froms) ->
         % icky hack of field values - compactor_pid used to store clients
@@ -439,33 +440,25 @@ handle_call({open, DbName, Options}, From, Server) ->
         {reply, {ok, Db#db{fd_monitor = Monitor}}, Server}
     end;
 handle_call({create, DbName, Options}, From, Server) ->
-    DbNameList = binary_to_list(DbName),
-    Filepath = get_full_filename(Server, DbNameList),
-    case check_dbname(Server, DbNameList) of
-    ok ->
-        case ets:lookup(?DBS, DbName) of
-        [] ->
-            case make_room(Server, Options) of
-            {ok, Server2} ->
-                {noreply, open_async(Server2, From, DbName, Filepath,
-                        [create | Options])};
-            CloseError ->
-                {reply, CloseError, Server}
-            end;
-        [#db{fd=open}=Db] ->
-            % We're trying to create a database while someone is in
-            % the middle of trying to open it. We allow one creator
-            % to wait while we figure out if it'll succeed.
-            % icky hack of field values - fd used to store create request
-            CrOptions = [create | Options],
-            NewDb = Db#db{fd={create, DbName, Filepath, CrOptions, From}},
-            true = ets:insert(?DBS, NewDb),
-            {noreply, Server};
-        [_AlreadyRunningDb] ->
-            {reply, file_exists, Server}
+    case ets:lookup(?DBS, DbName) of
+    [] ->
+        case make_room(Server, Options) of
+        {ok, Server2} ->
+            {noreply, open_async(Server2, From, DbName, [create | Options])};
+        CloseError ->
+            {reply, CloseError, Server}
         end;
-    Error ->
-        {reply, Error, Server}
+    [#db{fd=open}=Db] ->
+        % We're trying to create a database while someone is in
+        % the middle of trying to open it. We allow one creator
+        % to wait while we figure out if it'll succeed.
+        % icky hack of field values - fd used to store create request
+        CrOptions = [create | Options],
+        NewDb = Db#db{fd={create, DbName, CrOptions, From}},
+        true = ets:insert(?DBS, NewDb),
+        {noreply, Server};
+    [_AlreadyRunningDb] ->
+        {reply, file_exists, Server}
     end;
 handle_call({delete, DbName, Options}, _From, Server) ->
     DbNameList = binary_to_list(DbName),
