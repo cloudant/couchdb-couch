@@ -312,8 +312,11 @@ close_idle_db(DbName) when is_binary(DbName) ->
     true = ets:insert(?MONITORS, {DbName, Monitor, inactive}),
     case couch_db_monitor:is_idle(Monitor) of
         true ->
+            [#db{} = Db] = ets:lookup(?DBS, DbName),
+            exit(Db#db.main_pid, kill),
             true = ets:delete(?DBS, DbName),
-            true = ets:delete(?PIDS, Monitor),
+            true = ets:delete(?PIDS, Db#db.main_pid),
+            true = ets:delete(?MONITORS, DbName),
             true = ets:delete(?IDLE, DbName);
         false ->
             true = ets:insert(?MONITORS, {DbName, Monitor, active}),
