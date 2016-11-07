@@ -83,7 +83,7 @@ open(DbName, Options0, RetryCount) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
     Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
     case ets:lookup(?MONITORS, DbName) of
-    [{DbName, Monitor}] ->
+    [{DbName, Monitor, active}] ->
         case couch_db_monitor:incref(Monitor) of
             ok ->
                 [#db{} = Db] = ets:lookup(?DBS, DbName),
@@ -305,18 +305,18 @@ close_idle_db('$end_of_table') ->
     erlang:error(all_dbs_active);
 
 close_idle_db(DbName) when is_binary(DbName) ->
-    [{DbName, Monitor}] = ets:lookup(?MONITORS, DbName),
+    [{DbName, Monitor, active}] = ets:lookup(?MONITORS, DbName),
     % Turn off messages to the monitor so that we
     % know that no more clients will send requests
     % to it
-    true = ets:delete(?MONITORS, DbName),
+    true = ets:insert(?MONITORS, {DbName, Monitor, inactive}),
     case couch_db_monitor:is_idle(Monitor) of
         true ->
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, Monitor),
             true = ets:delete(?IDLE, DbName);
         false ->
-            true = ets:insert(?MONITORS, {DbName, Monitor}),
+            true = ets:insert(?MONITORS, {DbName, Monitor, active}),
             close_idle_db(ets:next(?IDLE, DbName))
     end.
 
@@ -349,7 +349,9 @@ open_async(Server, From, DbName, Filepath, Options) ->
         options = Options
     }),
     true = ets:insert(?PIDS, {Opener, DbName}),
-    true = ets:insert(?MONITORS, {DbName, create_monitor(DbName, Options)}),
+    IsSysDb = lists:member(sys_db, Options),
+    {ok, Monitor} = couch_db_monitor:start_link(DbName, IsSysDb),
+    true = ets:insert(?MONITORS, {DbName, Monitor, inactive}),
     db_opened(Server, Options).
 
 handle_call(open_dbs_count, _From, Server) ->
@@ -366,7 +368,7 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     % icky hack of field values - compactor_pid used to store clients
     % and fd used to possibly store a creation request
     [#db{fd=ReqType, compactor_pid=Froms}] = ets:lookup(?DBS, DbName),
-    [{DbName, Monitor}] = ets:lookup(?MONITORS, DbName),
+    [{DbName, Monitor, inactive}] = ets:lookup(?MONITORS, DbName),
     lists:foreach(fun(From) ->
         ok = couch_db_monitor:incref(Monitor, From),
         gen_server:reply(From, {ok, Db#db{fd_monitor = Monitor}})
@@ -380,8 +382,9 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     end,
     true = ets:insert(?DBS, Db),
     true = ets:insert(?PIDS, {Db#db.main_pid, DbName}),
-    [{DbName, Monitor}] = ets:lookup(?MONITORS, DbName),
+    [{DbName, Monitor, inactive}] = ets:lookup(?MONITORS, DbName),
     couch_db_monitor:set_db_pid(Monitor, Db#db.main_pid),
+    true = ets:insert(?MONITORS, {DbName, Monitor, active}),
     {reply, ok, Server};
 handle_call({open_result, T0, DbName, {error, eexist}}, From, Server) ->
     handle_call({open_result, T0, DbName, file_exists}, From, Server);
@@ -389,7 +392,7 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
     % icky hack of field values - compactor_pid used to store clients
     [#db{fd=ReqType, compactor_pid=Froms}=Db] = ets:lookup(?DBS, DbName),
     [gen_server:reply(From, Error) || From <- Froms],
-    [{DbName, Monitor}] = ets:lookup(?MONITORS, DbName),
+    [{DbName, Monitor, inactive}] = ets:lookup(?MONITORS, DbName),
     couch_db_monitor:exit(Monitor),
     couch_log:info("open_result error ~p for ~s", [Error, DbName]),
     true = ets:delete(?DBS, DbName),
@@ -428,7 +431,7 @@ handle_call({open, DbName, Options}, From, Server) ->
         end,
         {noreply, Server};
     [#db{} = Db] ->
-        [{DbName, Monitor}] = ets:lookup(?MONITORS, DbName),
+        [{DbName, Monitor, active}] = ets:lookup(?MONITORS, DbName),
         ok = couch_db_monitor:incref(Monitor, From),
         {reply, {ok, Db#db{fd_monitor = Monitor}}, Server}
     end;
@@ -571,12 +574,6 @@ db_closed(Server, Options) ->
         false -> Server#server{dbs_open=Server#server.dbs_open - 1};
         true -> Server
     end.
-
-create_monitor(DbName, Options) ->
-    IsSysDb = lists:member(sys_db, Options),
-    {ok, Pid} = couch_db_monitor:start_link(DbName, IsSysDb),
-    Pid.
-
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
