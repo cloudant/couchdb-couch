@@ -367,7 +367,6 @@ open_async(Server, From, DbName, Options) ->
     % icky hack of field values - compactor_pid used to store clients
     % and fd used for opening request info
     IsSysDb = lists:member(sys_db, Options),
-    {ok, Monitor} = couch_db_monitor:start_link(DbName, IsSysDb),
     Entry = #entry{
         dbname = DbName,
         db = #db{
@@ -375,7 +374,7 @@ open_async(Server, From, DbName, Options) ->
             main_pid = Opener,
             options = Options
         },
-        monitor = Monitor,
+        monitor = couch_db_monitor:spawn_link(DbName, IsSysDb),
         status = inactive,
         req_type = ReqType,
         waiters = [From]
@@ -436,7 +435,7 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
         waiters = Waiters
     } = Entry,
     [gen_server:reply(From, Error) || From <- Waiters],
-    ok = couch_db_monitor:exit(Monitor),
+    ok = couch_db_monitor:close(Monitor),
     couch_log:info("open_result error ~p for ~s", [Error, DbName]),
     true = ets:delete(?DBS, DbName),
     true = ets:delete(?PIDS, FromPid),

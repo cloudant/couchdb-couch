@@ -11,13 +11,11 @@
 % the License.
 
 -module(couch_db_monitor).
--behavior(gen_server).
--vsn(1).
 
 
 -export([
-    start_link/2,
-    exit/1,
+    spawn_link/2,
+    close/1,
     set_db_pid/2,
     is_idle/1,
 
@@ -27,12 +25,7 @@
 ]).
 
 -export([
-    init/1,
-    terminate/2,
-    handle_call/3,
-    handle_cast/2,
-    handle_info/2,
-    code_change/3
+    init/2
 ]).
 
 
@@ -47,20 +40,22 @@
 -define(IDLE, couch_dbs_idle).
 
 
-start_link(DbName, IsSysDb) ->
-    gen_server:start_link(?MODULE, {DbName, IsSysDb}, []).
+spawn_link(DbName, IsSysDb) ->
+    erlang:spawn_link(?MODULE, init, [DbName, IsSysDb]).
 
 
-exit(Monitor) ->
-    gen_server:cast(Monitor, exit).
+close(Monitor) ->
+    Monitor ! exit,
+    ok.
 
 
 set_db_pid(Monitor, DbPid) ->
-    gen_server:cast(Monitor, {set_db_pid, DbPid}).
+    Monitor ! {set_db_pid, DbPid},
+    ok.
 
 
 is_idle(Monitor) ->
-    gen_server:call(Monitor, is_idle).
+    call(Monitor, is_idle).
 
 
 incref(Monitor) ->
@@ -68,8 +63,8 @@ incref(Monitor) ->
 
 
 incref(Monitor, Client) when is_pid(Client) ->
-    case (catch gen_server:call(Monitor, {incref, Client})) of
-        {'EXIT', {noproc, _}} ->
+    case call(Monitor, {incref, Client}) of
+        {error, noproc} ->
             retry;
         Else ->
             Else
@@ -80,21 +75,17 @@ incref(Monitor, {Client, _}) when is_pid(Client) ->
 
 
 decref(Monitor) ->
-    gen_server:call(Monitor, decref).
+    ok = call(Monitor, decref).
 
 
-init({DbName, IsSysDb}) ->
+init(DbName, IsSysDb) ->
     {ok, CRefs} = khash:new(),
-    {ok, #st{
+    loop(#st{
         dbname = DbName,
         is_sys_db = IsSysDb,
         db_ref = undefined,
         client_refs = CRefs
-    }}.
-
-
-terminate(_Reason, _St) ->
-    ok.
+    }).
 
 
 handle_call({incref, Client}, _From, St) ->
@@ -143,20 +134,16 @@ handle_call(Msg, _From, St) ->
     {stop, {bad_call, Msg}, {bad_call, Msg}, St}.
 
 
-handle_cast(exit, St) ->
+handle_info(exit, St) ->
     {stop, normal, St};
 
-handle_cast({set_db_pid, Pid}, #st{db_ref = undefined} = St) ->
+handle_info({set_db_pid, Pid}, #st{db_ref = undefined} = St) ->
     Ref = erlang:monitor(process, Pid),
     {noreply, St#st{db_ref = Ref}};
 
-handle_cast({set_db_pid, Pid}, #st{db_ref = Ref} = St) when is_reference(Ref) ->
+handle_info({set_db_pid, Pid}, #st{db_ref = Ref} = St) when is_reference(Ref) ->
     erlang:demonitor(Ref, [flush]),
-    handle_cast({set_db_pid, Pid}, St#st{db_ref = undefined});
-
-handle_cast(Msg, St) ->
-    {stop, {bad_cast, Msg}, St}.
-
+    handle_info({set_db_pid, Pid}, St#st{db_ref = undefined});
 
 handle_info({'DOWN', Ref, process, _, _}, #st{db_ref = Ref} = St) ->
     {stop, normal, St};
@@ -168,10 +155,6 @@ handle_info({'DOWN', _Ref, process, Pid, _Reason}, St) ->
 
 handle_info(Msg, St) ->
     {stop, {bad_info, Msg}, St}.
-
-
-code_change(_Vsn, St, _Extra) ->
-    {ok, St}.
 
 
 maybe_set_idle(St) ->
@@ -186,4 +169,49 @@ maybe_set_idle(St) ->
         N when is_integer(N), N > 0 ->
             % We have other clients
             ok
+    end.
+
+
+loop(St) ->
+    receive
+        {call, From, Cmd} ->
+            do_handle_call(Cmd, From, St);
+        Other ->
+            do_handle_info(Other, St)
+    end.
+
+
+do_handle_call(Cmd, {Pid, Ref} = From, St) ->
+    try handle_call(Cmd, From, St) of
+        {reply, Msg, NewSt} ->
+            Pid ! {Ref, Msg},
+            loop(NewSt);
+        {stop, Reason, Msg, _NewSt} ->
+            Pid ! {Ref, Msg},
+            exit(Reason)
+    catch T:R ->
+        exit({T, R})
+    end.
+
+
+do_handle_info(Msg, St) ->
+    try handle_info(Msg, St) of
+        {noreply, NewSt} ->
+            loop(NewSt);
+        {stop, Reason, _NewSt} ->
+            exit(Reason)
+    catch T:R ->
+        exit({T, R})
+    end.
+
+
+call(Pid, Cmd) when is_pid(Pid) ->
+    Ref = erlang:monitor(process, Pid),
+    Pid ! {call, {self(), Ref}, Cmd},
+    receive
+        {Ref, Resp} ->
+            erlang:demonitor(Ref, [flush]),
+            Resp;
+        {'DOWN', Ref, process, Pid, _Reason} ->
+            {error, noproc}
     end.
