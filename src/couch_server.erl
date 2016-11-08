@@ -30,7 +30,7 @@
 -define(PIDS, couch_dbs_pid_to_name).
 -define(IDLE, couch_dbs_idle).
 
--define(MAX_DBS_OPEN, 100).
+-define(MAX_DBS_OPEN, 5000).
 -define(RELISTEN_DELAY, 5000).
 -define(DEFAULT_RETRIES, 1000).
 
