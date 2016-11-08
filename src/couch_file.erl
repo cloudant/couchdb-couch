@@ -129,7 +129,7 @@ append_term_md5(Fd, Term, Options) ->
 
 append_binary(Fd, Bin) ->
     ioq:call(Fd, {append_bin, assemble_file_chunk(Bin)}, erlang:get(io_priority)).
-    
+
 append_binary_md5(Fd, Bin) ->
     ioq:call(Fd,
         {append_bin, assemble_file_chunk(Bin, couch_crypto:hash(md5, Bin))},
@@ -526,7 +526,7 @@ handle_info({'EXIT', Pid, _}, #file{db_pid=Pid}=File) ->
 handle_info({'EXIT', _, normal}, Fd) ->
     {noreply, Fd};
 handle_info({'EXIT', _, Reason}, Fd) ->
-    {stop, Reason, Fd}.
+    {stop, normal, Fd}.
 
 
 find_header(Fd, Block) ->
