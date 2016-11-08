@@ -380,8 +380,6 @@ open_async(Server, From, DbName, Options) ->
         true -> create;
         false -> open
     end,
-    % icky hack of field values - compactor_pid used to store clients
-    % and fd used for opening request info
     IsSysDb = lists:member(sys_db, Options),
     Entry = #entry{
         dbname = DbName,
@@ -410,8 +408,6 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     true = ets:delete(?PIDS, FromPid),
     OpenTime = timer:now_diff(os:timestamp(), T0) / 1000,
     couch_stats:update_histogram([couchdb, db_open_time], OpenTime),
-    % icky hack of field values - compactor_pid used to store clients
-    % and fd used to possibly store a creation request
     [#entry{status = inactive} = Entry] = ets:lookup(?DBS, DbName),
     #entry{
         monitor = Monitor,
@@ -442,7 +438,6 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
 handle_call({open_result, T0, DbName, {error, eexist}}, From, Server) ->
     handle_call({open_result, T0, DbName, file_exists}, From, Server);
 handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
-    % icky hack of field values - compactor_pid used to store clients
     [#entry{status = inactive} = Entry] = ets:lookup(?DBS, DbName),
     #entry{
         db = Db,
@@ -596,7 +591,6 @@ handle_info({'EXIT', Pid, Reason}, Server) ->
             couch_log:error(Msg, [])
         end,
         couch_log:info("db ~s died with reason ~p", [DbName, Reason]),
-        % icky hack of field values - compactor_pid used to store clients
         if not is_list(Waiters) -> ok; true ->
             [gen_server:reply(From, Reason) || From <- Waiters]
         end,
