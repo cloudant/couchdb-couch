@@ -215,8 +215,9 @@ init([]) ->
 terminate(Reason, Srv) ->
     Msg = "couch_server terminating with ~p, state ~2048p",
     couch_log:error(Msg, [Reason, Srv]),
-    ets:foldl(fun(#db{main_pid=Pid}, _) -> couch_util:shutdown_sync(Pid) end,
-        nil, ?DBS),
+    ets:foldl(fun(#entry{db = Db}, _) ->
+        couch_util:shutdown_sync(Db#db.main_pid)
+    end, nil, ?DBS),
     ok.
 
 handle_config_change("couchdb", "database_dir", _, _, _) ->
@@ -491,14 +492,13 @@ handle_call({create, DbName, Options}, From, Server) ->
         % We're trying to create a database while someone is in
         % the middle of trying to open it. We allow one creator
         % to wait while we figure out if it'll succeed.
-        % icky hack of field values - fd used to store create request
         CrOptions = [create | Options],
         NewEntry = Entry#entry{
             req_type = {create, DbName, CrOptions, From}
         },
         true = ets:insert(?DBS, NewEntry),
         {noreply, Server};
-    [#entry{status = active}] ->
+    [#entry{}] ->
         {reply, file_exists, Server}
     end;
 handle_call({delete, DbName, Options}, _From, Server) ->
