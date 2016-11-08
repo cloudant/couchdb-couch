@@ -329,6 +329,7 @@ close_idle_db(DbName) when is_binary(DbName) ->
     % exiting when it gets the 'DOWN' message from Db#db.main_pid
     case couch_db_monitor:is_idle(Monitor) of
         true ->
+            gen_server:cast(Db#db.fd, close),
             exit(Db#db.main_pid, kill),
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, Db#db.main_pid),
