@@ -16,6 +16,7 @@
 -export([
     spawn_link/2,
     close/1,
+    close_if_idle/1,
     set_db_pid/2,
     is_idle/1,
 
@@ -33,7 +34,8 @@
     dbname,
     is_sys_db,
     db_ref,
-    client_refs
+    client_refs,
+    closing
 }).
 
 
@@ -47,6 +49,10 @@ spawn_link(DbName, IsSysDb) ->
 close(Monitor) ->
     Monitor ! exit,
     ok.
+
+
+close_if_idle(Monitor) ->
+    call(Monitor, close_if_idle).
 
 
 set_db_pid(Monitor, DbPid) ->
@@ -84,9 +90,13 @@ init(DbName, IsSysDb) ->
         dbname = DbName,
         is_sys_db = IsSysDb,
         db_ref = undefined,
-        client_refs = CRefs
+        client_refs = CRefs,
+        closing = false
     }).
 
+
+handle_call({incref, _}, _From, #st{closing = true} = St) ->
+    {reply, retry, St};
 
 handle_call({incref, Client}, _From, St) ->
     case khash:get(St#st.client_refs, Client) of
@@ -122,6 +132,14 @@ handle_call(decref, {Pid, _}, St) ->
             ok
     end,
     {reply, ok, St};
+
+handle_call(close_if_idle, _From, St) ->
+    case khash:size(St#st.client_refs) of
+        0 ->
+            {reply, closing, St#st{closing = true}};
+        _ ->
+            {reply, not_idle, St}
+    end;
 
 handle_call(is_idle, _From, St) ->
     Reply = case khash:size(St#st.client_refs) of
@@ -172,12 +190,22 @@ maybe_set_idle(St) ->
     end.
 
 
-loop(St) ->
+loop(#st{closing = false} = St) ->
     receive
         {call, From, Cmd} ->
             do_handle_call(Cmd, From, St);
         Other ->
             do_handle_info(Other, St)
+    end;
+
+loop(#st{closing = true} = St) ->
+    receive
+        {call, From, Cmd} ->
+            do_handle_call(Cmd, From, St);
+        Other ->
+            do_handle_info(Other, St)
+    after 0 ->
+        exit(normal)
     end.
 
 

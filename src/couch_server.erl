@@ -342,14 +342,14 @@ close_idle_db(DbName, Db, Monitor) ->
     % TODO: Need to change this to something like "close_if_idle"
     % so that the monitor will tell any new clients to retry before
     % exiting when it gets the 'DOWN' message from Db#db.main_pid
-    case couch_db_monitor:is_idle(Monitor) of
-        true ->
+    case couch_db_monitor:close_if_idle(Monitor) of
+        closing ->
             gen_server:cast(Db#db.fd, close),
             exit(Db#db.main_pid, kill),
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, Db#db.main_pid),
             true = ets:delete(?IDLE, DbName);
-        false ->
+        not_idle ->
             true = ets:update_element(?DBS, DbName, {#entry.status, active}),
             close_idle_db(ets:next(?IDLE, DbName))
     end.
