@@ -316,11 +316,25 @@ close_idle_db('$end_of_table') ->
     erlang:error(all_dbs_active);
 
 close_idle_db(DbName) when is_binary(DbName) ->
-    [#entry{status = active} = Entry] = ets:lookup(?DBS, DbName),
-    #entry{
-        db = Db,
-        monitor = Monitor
-    } = Entry,
+    case ets:lookup(?DBS, DbName) of
+        [#entry{status = active} = Entry] ->
+            #entry{
+                db = Db,
+                monitor = Monitor
+            } = Entry,
+            close_idle_db(DbName, Db, Monitor);
+        [] ->
+            % Its posisble that a monitor got a decref
+            % message before an 'EXIT' message when we're
+            % closing idle databases. This could put an
+            % entry into ?IDLE that we have to ignore
+            % here.
+            true = ets:delete(?IDLE, DbName),
+            close_idle_db(ets:next(?IDLE, DbName))
+    end.
+
+
+close_idle_db(DbName, Db, Monitor) ->
     % Turn off messages to the monitor so that we
     % know that no more clients will send requests
     % to it
