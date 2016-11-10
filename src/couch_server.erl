@@ -111,6 +111,7 @@ open(DbName, Options0, RetryCount) ->
         OpenOpts = [{timestamp, os:timestamp()} | Options],
         case gen_server:call(couch_server, {open, DbName, OpenOpts}, Timeout) of
         {ok, #db{} = Db} ->
+            true = is_process_alive(Db#db.fd_monitor),
             {ok, Db#db{user_ctx = Ctx}};
         {not_found, no_db_file} when Create ->
             couch_log:warning("creating missing database: ~s", [DbName]),
@@ -124,6 +125,7 @@ create(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
     case gen_server:call(couch_server, {create, DbName, Options}, infinity) of
     {ok, #db{} = Db} ->
+        true = is_process_alive(Db#db.fd_monitor),
         Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
         {ok, Db#db{user_ctx = Ctx}};
     Error ->
@@ -387,6 +389,7 @@ open_async(Server, From, DbName, Options) ->
         db = #db{
             name = DbName,
             main_pid = Opener,
+            header = undefined,
             options = Options
         },
         monitor = couch_db_monitor:spawn_link(DbName, IsSysDb),
