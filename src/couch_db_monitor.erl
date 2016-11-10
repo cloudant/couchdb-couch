@@ -234,12 +234,11 @@ do_handle_info(Msg, St) ->
 
 
 call(Pid, Cmd) when is_pid(Pid) ->
-    Ref = erlang:monitor(process, Pid),
+    Ref = erlang:make_ref(),
     Pid ! {call, {self(), Ref}, Cmd},
     receive
         {Ref, Resp} ->
-            erlang:demonitor(Ref, [flush]),
             Resp;
-        {'DOWN', Ref, process, Pid, _Reason} ->
+        {'EXIT', Pid, _Reason} ->
             {error, noproc}
     end.
