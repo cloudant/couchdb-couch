@@ -500,7 +500,7 @@ handle_call(find_header, _From, #file{fd = Fd, eof = Pos} = File) ->
     {reply, find_header(Fd, Pos div ?SIZE_BLOCK), File}.
 
 handle_cast(close, Fd) ->
-    {stop,normal,Fd}.
+    {stop, normal, Fd}.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -517,16 +517,8 @@ handle_info(maybe_close, File) ->
             {noreply, File}
     end;
 
-handle_info({'EXIT', Pid, _}, #file{db_pid=Pid}=File) ->
-    case is_idle(File) of
-        true -> {stop, normal, File};
-        false -> {noreply, File}
-    end;
-
-handle_info({'EXIT', _, normal}, Fd) ->
-    {noreply, Fd};
-handle_info({'EXIT', _, Reason}, Fd) ->
-    {stop, normal, Fd}.
+handle_info({'EXIT', _, _}, File) ->
+    {stop, normal, File}.
 
 
 find_header(Fd, Block) ->
