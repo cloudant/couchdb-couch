@@ -337,6 +337,14 @@ close_idle_db(DbName) when is_binary(DbName) ->
     end.
 
 
+close_idle_db(DbName, #db{compactor_pid = Pid}, _Monitor)
+        when Pid /= nil ->
+    close_idle_db(ets:next(?IDLE, DbName));
+
+close_idle_db(DbName, #db{waiting_delayed_commit = WDC}, _Monitor)
+        when WDC /= nil ->
+    close_idle_db(ets:next(?IDLE, DbName));
+
 close_idle_db(DbName, Db, Monitor) ->
     % Turn off messages to the monitor so that we
     % know that no more clients will send requests
