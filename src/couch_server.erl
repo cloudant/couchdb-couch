@@ -321,6 +321,7 @@ open_async(Server, From, DbName, Filepath, Options) ->
     % and fd used for opening request info
     true = ets:insert(?DBS, #db{
         name = DbName,
+        header = undefined,
         fd = ReqType,
         main_pid = Opener,
         compactor_pid = [From],
