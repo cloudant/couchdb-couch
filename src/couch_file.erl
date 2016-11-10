@@ -366,7 +366,12 @@ init({Filepath, Options, ReturnPid, Ref}) ->
                     ok = file:sync(Fd),
                     maybe_track_open_os_files(Options),
                     erlang:send_after(?INITIAL_WAIT, self(), maybe_close),
-                    {ok, #file{fd=Fd, is_sys=IsSys, pread_limit=Limit}};
+                    {ok, #file{
+                        fd = Fd,
+                        is_sys = IsSys,
+                        db_pid = ReturnPid,
+                        pread_limit = Limit
+                    }};
                 false ->
                     ok = file:close(Fd),
                     init_status_error(ReturnPid, Ref, {error, eexist})
@@ -374,7 +379,12 @@ init({Filepath, Options, ReturnPid, Ref}) ->
             false ->
                 maybe_track_open_os_files(Options),
                 erlang:send_after(?INITIAL_WAIT, self(), maybe_close),
-                {ok, #file{fd=Fd, is_sys=IsSys, pread_limit=Limit}}
+                {ok, #file{
+                    fd = Fd,
+                    is_sys = IsSys,
+                    db_pid = ReturnPid,
+                    pread_limit = Limit
+                }}
             end;
         Error ->
             init_status_error(ReturnPid, Ref, Error)
