@@ -238,7 +238,7 @@ call(Pid, Cmd) when is_pid(Pid) ->
     Pid ! {call, {self(), Ref}, Cmd},
     receive
         {Ref, Resp} ->
-            Resp;
-        {'EXIT', Pid, _Reason} ->
-            {error, noproc}
+            Resp
+    after 5000 ->
+        erlang:error({couch_db_monitor, {timeout, Pid, Cmd}})
     end.
