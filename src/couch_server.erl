@@ -101,7 +101,8 @@ open(DbName, Options0) ->
     _ ->
         Timeout = couch_util:get_value(timeout, Options, infinity),
         Create = couch_util:get_value(create_if_missing, Options, false),
-        case gen_server:call(couch_server, {open, DbName, Options}, Timeout) of
+        OpenOpts = [{timestamp, os:timestamp()} | Options],
+        case gen_server:call(couch_server, {open, DbName, OpenOpts}, Timeout) of
         {ok, #db{} = Db} ->
             {ok, Db#db{user_ctx = Ctx}};
         {not_found, no_db_file} when Create ->
@@ -490,37 +491,42 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
             {reply, ok, db_closed(NewServer, Db#db.options)}
     end;
 handle_call({open, DbName, Options}, From, Server) ->
-    case ets:lookup(?DBS, DbName) of
-    [] ->
-        case make_room(Server, Options) of
-        {ok, Server2} ->
-            {noreply, open_async(Server2, From, DbName, Options)};
-        CloseError ->
-            {reply, CloseError, Server}
-        end;
-    [#entry{status = inactive} = Entry] ->
-        #entry{
-            waiters = Waiters
-        } = Entry,
-        NewEntry = Entry#entry{
-            waiters = [From | Waiters]
-        },
-        true = ets:insert(?DBS, NewEntry),
-        if length(Waiters) =< 10 -> ok; true ->
-            Fmt = "~b clients waiting to open db ~s",
-            couch_log:info(Fmt, [length(Waiters) + 1, DbName])
-        end,
-        {noreply, Server};
-    [#entry{status = active} = Entry] ->
-        #entry{
-            db = Db,
-            monitor = Monitor
-        } = Entry,
-        ok = incref(DbName),
-        {Client, _} = From,
-        ok = couch_db_monitor:notify(Monitor, Client),
-        ClientMon = {Client, Monitor, couch_db:is_system_db(Db)},
-        {reply, {ok, Db#db{fd_monitor = ClientMon}}, Server}
+    case should_drop(Options) of
+    true ->
+        {reply, timedout, Server};
+    false ->
+        case ets:lookup(?DBS, DbName) of
+        [] ->
+            case make_room(Server, Options) of
+            {ok, Server2} ->
+                {noreply, open_async(Server2, From, DbName, Options)};
+            CloseError ->
+                {reply, CloseError, Server}
+            end;
+        [#entry{status = inactive} = Entry] ->
+            #entry{
+                waiters = Waiters
+            } = Entry,
+            NewEntry = Entry#entry{
+                waiters = [From | Waiters]
+            },
+            true = ets:insert(?DBS, NewEntry),
+            if length(Waiters) =< 10 -> ok; true ->
+                Fmt = "~b clients waiting to open db ~s",
+                couch_log:info(Fmt, [length(Waiters) + 1, DbName])
+            end,
+            {noreply, Server};
+        [#entry{status = active} = Entry] ->
+            #entry{
+                db = Db,
+                monitor = Monitor
+            } = Entry,
+            ok = incref(DbName),
+            {Client, _} = From,
+            ok = couch_db_monitor:notify(Monitor, Client),
+            ClientMon = {Client, Monitor, couch_db:is_system_db(Db)},
+            {reply, {ok, Db#db{fd_monitor = ClientMon}}, Server}
+        end
     end;
 handle_call({create, DbName, Options}, From, Server) ->
     case ets:lookup(?DBS, DbName) of
@@ -668,6 +674,16 @@ incref(DbName) ->
         {'EXIT', {badarg, _}} ->
             missing_counter
     end.
+
+
+should_drop(Options) ->
+    Timeout = couch_util:get_value(timeout, Options, infinity),
+    Timestamp = couch_util:get_value(timestamp, Options, {0, 0, 0}),
+    % Timeout is in millisecond, now_diff returns micro so we
+    % have to devide by 1000
+    Diff = timer:now_diff(os:timestamp(), Timestamp) / 1000,
+    Timeout /= infinity andalso Diff > (Timeout * 1.25).
+
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
