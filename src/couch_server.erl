@@ -353,7 +353,7 @@ close_idle_db(DbName, Db, Monitor) ->
     % TODO: Need to change this to something like "close_if_idle"
     % so that the monitor will tell any new clients to retry before
     % exiting when it gets the 'DOWN' message from Db#db.main_pid
-    case couch_db_monitor:close_if_idle(Monitor) of
+    case couch_db_monitor:close_if_idle(Monitor, [unmonitored]) of
         closing ->
             gen_server:cast(Db#db.fd, close),
             exit(Db#db.main_pid, kill),
@@ -428,7 +428,7 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     } = Entry,
     ok = couch_db_monitor:set_db_pid(Monitor, Db#db.main_pid),
     lists:foreach(fun(From) ->
-        ok = couch_db_monitor:incref(Monitor, From),
+        ok = couch_db_monitor:incref(Monitor, From, [unmonitored]),
         gen_server:reply(From, {ok, Db#db{fd_monitor = Monitor}})
     end, Waiters),
     % Cancel the creation request if it exists.
@@ -501,7 +501,7 @@ handle_call({open, DbName, Options}, From, Server) ->
                 db = Db,
                 monitor = Monitor
             } = Entry,
-            ok = couch_db_monitor:incref(Monitor, From),
+            ok = couch_db_monitor:incref(Monitor, From, [unmonitored]),
             {reply, {ok, Db#db{fd_monitor = Monitor}}, Server}
         end
     end;

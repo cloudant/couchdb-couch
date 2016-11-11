@@ -17,11 +17,13 @@
     spawn_link/2,
     close/1,
     close_if_idle/1,
+    close_if_idle/2,
     set_db_pid/2,
     is_idle/1,
 
     incref/1,
     incref/2,
+    incref/3,
     decref/1
 ]).
 
@@ -52,7 +54,11 @@ close(Monitor) ->
 
 
 close_if_idle(Monitor) ->
-    call(Monitor, close_if_idle).
+    call(Monitor, close_if_idle, []).
+
+
+close_if_idle(Monitor, Options) ->
+    call(Monitor, close_if_idle, Options).
 
 
 set_db_pid(Monitor, DbPid) ->
@@ -65,19 +71,23 @@ is_idle(Monitor) ->
 
 
 incref(Monitor) ->
-    incref(Monitor, self()).
+    incref(Monitor, self(), []).
 
 
-incref(Monitor, Client) when is_pid(Client) ->
-    case call(Monitor, {incref, Client}) of
+incref(Monitor, Client) ->
+    incref(Monitor, Client, []).
+
+
+incref(Monitor, Client, Options) when is_pid(Client) ->
+    case call(Monitor, {incref, Client}, Options) of
         {error, noproc} ->
             retry;
         Else ->
             Else
     end;
 
-incref(Monitor, {Client, _}) when is_pid(Client) ->
-    incref(Monitor, Client).
+incref(Monitor, {Client, _}, Options) when is_pid(Client) ->
+    incref(Monitor, Client, Options).
 
 
 decref(Monitor) ->
@@ -234,11 +244,27 @@ do_handle_info(Msg, St) ->
 
 
 call(Pid, Cmd) when is_pid(Pid) ->
-    Ref = erlang:make_ref(),
-    Pid ! {call, {self(), Ref}, Cmd},
-    receive
-        {Ref, Resp} ->
-            Resp
-    after 5000 ->
-        erlang:error({couch_db_monitor, {timeout, Pid, Cmd}})
+    call(Pid, Cmd, []).
+
+
+call(Pid, Cmd, Options) ->
+    case lists:member(unmonitored, Options) of
+        true ->
+            Ref = erlang:make_ref(),
+            Pid ! {call, {self(), Ref}, Cmd},
+            receive
+                {Ref, Resp} ->
+                    Resp
+            after 5000 ->
+                erlang:error({couch_db_monitor, {timeout, Pid, Cmd}})
+            end;
+        false ->
+            Ref = erlang:monitor(process, Pid),
+            Pid ! {call, {self(), Ref}, Cmd},
+            receive
+                {Ref, Resp} ->
+                    Resp;
+                {'DOWN', Ref, process, Pid, _Reason} ->
+                    {error, noproc}
+            end
     end.
