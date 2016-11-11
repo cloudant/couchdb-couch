@@ -335,6 +335,8 @@ handle_info({'EXIT', _Pid, normal}, Db) ->
     {noreply, Db};
 handle_info({'EXIT', _Pid, Reason}, Db) ->
     {stop, Reason, Db};
+handle_info({'DOWN', Ref, _, _, normal}, #db{fd_monitor=Ref} = Db) ->
+    {stop, normal, Db#db{fd = undefined, fd_monitor = closed}};
 handle_info({'DOWN', Ref, _, _, Reason}, #db{fd_monitor=Ref, name=Name} = Db) ->
     couch_log:error("DB ~s shutting down - Fd ~p", [Name, Reason]),
     {stop, normal, Db#db{fd=undefined, fd_monitor=closed}}.
