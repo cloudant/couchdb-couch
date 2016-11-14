@@ -16,15 +16,11 @@
 -export([
     spawn_link/2,
     close/1,
-    close_if_idle/1,
-    close_if_idle/2,
     set_db_pid/2,
-    is_idle/1,
 
-    incref/1,
-    incref/2,
-    incref/3,
-    decref/1
+    notify/1,
+    notify/2,
+    cancel/1
 ]).
 
 -export([
@@ -41,6 +37,7 @@
 }).
 
 
+-define(COUNTERS, couch_dbs_counters).
 -define(IDLE, couch_dbs_idle).
 
 
@@ -53,45 +50,25 @@ close(Monitor) ->
     ok.
 
 
-close_if_idle(Monitor) ->
-    call(Monitor, close_if_idle, []).
-
-
-close_if_idle(Monitor, Options) ->
-    call(Monitor, close_if_idle, Options).
-
-
 set_db_pid(Monitor, DbPid) ->
     Monitor ! {set_db_pid, DbPid},
     ok.
 
 
-is_idle(Monitor) ->
-    call(Monitor, is_idle).
+notify(Monitor) ->
+    notify(Monitor, self()).
 
 
-incref(Monitor) ->
-    incref(Monitor, self(), []).
+notify(Monitor, Client) when is_pid(Client) ->
+    Monitor ! {notify, Client},
+    ok;
+
+notify(Monitor, {Client, _}) when is_pid(Client) ->
+    notify(Monitor, Client).
 
 
-incref(Monitor, Client) ->
-    incref(Monitor, Client, []).
-
-
-incref(Monitor, Client, Options) when is_pid(Client) ->
-    case call(Monitor, {incref, Client}, Options) of
-        {error, noproc} ->
-            retry;
-        Else ->
-            Else
-    end;
-
-incref(Monitor, {Client, _}, Options) when is_pid(Client) ->
-    incref(Monitor, Client, Options).
-
-
-decref(Monitor) ->
-    ok = call(Monitor, decref).
+cancel(Monitor) ->
+    Monitor ! {cancel, self()}.
 
 
 init(DbName, IsSysDb) ->
@@ -105,10 +82,19 @@ init(DbName, IsSysDb) ->
     }).
 
 
-handle_call({incref, _}, _From, #st{closing = true} = St) ->
-    {reply, retry, St};
 
-handle_call({incref, Client}, _From, St) ->
+handle_info(exit, St) ->
+    {stop, normal, St};
+
+handle_info({set_db_pid, Pid}, #st{db_ref = undefined} = St) ->
+    Ref = erlang:monitor(process, Pid),
+    {noreply, St#st{db_ref = Ref}};
+
+handle_info({set_db_pid, Pid}, #st{db_ref = Ref} = St) when is_reference(Ref) ->
+    erlang:demonitor(Ref, [flush]),
+    handle_info({set_db_pid, Pid}, St#st{db_ref = undefined});
+
+handle_info({notify, Client}, St) when is_pid(Client) ->
     case khash:get(St#st.client_refs, Client) of
         {Ref, Count} when is_reference(Ref), is_integer(Count), Count > 0 ->
             khash:put(St#st.client_refs, Client, {Ref, Count + 1});
@@ -125,60 +111,37 @@ handle_call({incref, Client}, _From, St) ->
                     ok
             end
     end,
-    {reply, ok, St};
+    {noreply, St};
 
-handle_call(decref, {Pid, _}, St) ->
-    case khash:get(St#st.client_refs, Pid) of
+handle_info({cancel, Client}, St) when is_pid(Client) ->
+    case khash:get(St#st.client_refs, Client) of
         {Ref, 1} when is_reference(Ref) ->
             erlang:demonitor(Ref, [flush]),
-            khash:del(St#st.client_refs, Pid),
+            khash:del(St#st.client_refs, Client),
             maybe_set_idle(St);
         {Ref, Count} when is_reference(Ref), is_integer(Count), Count > 1 ->
-            khash:put(St#st.client_refs, Pid, {Ref, Count - 1});
+            khash:put(St#st.client_refs, Client, {Ref, Count - 1});
         undefined ->
             % Ignore for now, most likely this is from
             % fabric:get_security/1 which shares a db record
             % between processes
             ok
     end,
-    {reply, ok, St};
-
-handle_call(close_if_idle, _From, St) ->
-    case khash:size(St#st.client_refs) of
-        0 ->
-            {reply, closing, St#st{closing = true}};
-        _ ->
-            {reply, not_idle, St}
-    end;
-
-handle_call(is_idle, _From, St) ->
-    Reply = case khash:size(St#st.client_refs) of
-        0 -> true;
-        _ -> false
-    end,
-    {reply, Reply, St};
-
-handle_call(Msg, _From, St) ->
-    {stop, {bad_call, Msg}, {bad_call, Msg}, St}.
-
-
-handle_info(exit, St) ->
-    {stop, normal, St};
-
-handle_info({set_db_pid, Pid}, #st{db_ref = undefined} = St) ->
-    Ref = erlang:monitor(process, Pid),
-    {noreply, St#st{db_ref = Ref}};
-
-handle_info({set_db_pid, Pid}, #st{db_ref = Ref} = St) when is_reference(Ref) ->
-    erlang:demonitor(Ref, [flush]),
-    handle_info({set_db_pid, Pid}, St#st{db_ref = undefined});
+    {noreply, St};
 
 handle_info({'DOWN', Ref, process, _, _}, #st{db_ref = Ref} = St) ->
     {stop, normal, St};
 
 handle_info({'DOWN', _Ref, process, Pid, _Reason}, St) ->
-    khash:del(St#st.client_refs, Pid),
-    maybe_set_idle(St),
+    case khash:get(St#st.client_refs, Pid) of
+        {Ref, N} when is_reference(Ref), is_integer(N), N > 0 ->
+            ets:update_counter(?COUNTERS, St#st.dbname, -N),
+            khash:del(St#st.client_refs, Pid),
+            maybe_set_idle(St);
+        undefined ->
+            % Ignore unknown processes
+            ok
+    end,
     {noreply, St};
 
 handle_info(Msg, St) ->
@@ -200,35 +163,10 @@ maybe_set_idle(St) ->
     end.
 
 
-loop(#st{closing = false} = St) ->
+loop(St) ->
     receive
-        {call, From, Cmd} ->
-            do_handle_call(Cmd, From, St);
         Other ->
             do_handle_info(Other, St)
-    end;
-
-loop(#st{closing = true} = St) ->
-    receive
-        {call, From, Cmd} ->
-            do_handle_call(Cmd, From, St);
-        Other ->
-            do_handle_info(Other, St)
-    after 0 ->
-        exit(normal)
-    end.
-
-
-do_handle_call(Cmd, {Pid, Ref} = From, St) ->
-    try handle_call(Cmd, From, St) of
-        {reply, Msg, NewSt} ->
-            Pid ! {Ref, Msg},
-            loop(NewSt);
-        {stop, Reason, Msg, _NewSt} ->
-            Pid ! {Ref, Msg},
-            exit(Reason)
-    catch T:R ->
-        exit({T, R})
     end.
 
 
@@ -240,31 +178,4 @@ do_handle_info(Msg, St) ->
             exit(Reason)
     catch T:R ->
         exit({T, R})
-    end.
-
-
-call(Pid, Cmd) when is_pid(Pid) ->
-    call(Pid, Cmd, []).
-
-
-call(Pid, Cmd, Options) ->
-    case lists:member(unmonitored, Options) of
-        true ->
-            Ref = erlang:make_ref(),
-            Pid ! {call, {self(), Ref}, Cmd},
-            receive
-                {Ref, Resp} ->
-                    Resp
-            after 5000 ->
-                erlang:error({couch_db_monitor, {timeout, Pid, Cmd}})
-            end;
-        false ->
-            Ref = erlang:monitor(process, Pid),
-            Pid ! {call, {self(), Ref}, Cmd},
-            receive
-                {Ref, Resp} ->
-                    Resp;
-                {'DOWN', Ref, process, Pid, _Reason} ->
-                    {error, noproc}
-            end
     end.

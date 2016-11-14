@@ -20,6 +20,7 @@
 -export([init/1, handle_call/3,sup_start_link/0]).
 -export([handle_cast/2,code_change/3,handle_info/2,terminate/2]).
 -export([dev_start/0,is_admin/2,has_admins/0,get_stats/0]).
+-export([cancel_monitor/2]).
 
 % config_listener api
 -export([handle_config_change/5, handle_config_terminate/3]).
@@ -28,6 +29,7 @@
 
 -define(DBS, couch_dbs).
 -define(PIDS, couch_dbs_pid_to_name).
+-define(COUNTERS, couch_dbs_counters).
 -define(IDLE, couch_dbs_idle).
 
 -define(MAX_DBS_OPEN, 5000).
@@ -81,30 +83,21 @@ sup_start_link() ->
     gen_server:start_link({local, couch_server}, couch_server, [], []).
 
 
-open(DbName, Options) ->
-    open(DbName, Options, ?DEFAULT_RETRIES).
-
-open(_DbName, _Options, 0) ->
-    erlang:error(db_open_spin_lock_failed);
-
-open(DbName, Options0, RetryCount) ->
+open(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
     Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
-    case ets:lookup(?DBS, DbName) of
-    [#entry{status = active} = Entry] ->
-        #entry{
+    case incref(DbName) of
+    ok ->
+        [#entry{
             db = Db,
-            monitor = Monitor
-        } = Entry,
-        case couch_db_monitor:incref(Monitor) of
-            ok ->
-                {ok, Db#db{
-                    user_ctx = Ctx,
-                    fd_monitor = Monitor
-                }};
-            retry ->
-                open(DbName, Options0, RetryCount - 1)
-        end;
+            monitor = Monitor,
+            status = active
+        }] = ets:lookup(?DBS, DbName),
+        ok = couch_db_monitor:notify(Monitor),
+        {ok, Db#db{
+            user_ctx = Ctx,
+            fd_monitor = Monitor
+        }};
     _ ->
         Timeout = couch_util:get_value(timeout, Options, infinity),
         Create = couch_util:get_value(create_if_missing, Options, false),
@@ -195,6 +188,16 @@ hash_admin_passwords(Persist) ->
             config:set("admins", User, ?b2l(HashedPassword), Persist)
         end, couch_passwords:get_unhashed_admins()).
 
+cancel_monitor(DbName, Monitor) ->
+    couch_db_monitor:cancel(Monitor),
+    case (catch ets:update_counter(?COUNTERS, DbName, -1)) of
+        0 ->
+            true = ets:insert(?IDLE, {DbName}),
+            ok;
+        _ ->
+            ok
+    end.
+
 init([]) ->
     % read config and register for configuration changes
 
@@ -209,6 +212,7 @@ init([]) ->
     hash_admin_passwords(),
     ets:new(?DBS, [set, protected, named_table, {keypos, #entry.dbname}]),
     ets:new(?PIDS, [set, protected, named_table]),
+    ets:new(?COUNTERS, [set, public, named_table]),
     ets:new(?IDLE, [set, public, named_table]),
     process_flag(trap_exit, true),
     {ok, #server{root_dir=RootDir,
@@ -320,14 +324,10 @@ close_idle_db('$end_of_table') ->
 
 close_idle_db(DbName) when is_binary(DbName) ->
     case ets:lookup(?DBS, DbName) of
-        [#entry{status = active} = Entry] ->
-            #entry{
-                db = Db,
-                monitor = Monitor
-            } = Entry,
-            close_idle_db(DbName, Db, Monitor);
+        [#entry{status = active, db = Db}] ->
+            close_idle_db(DbName, Db);
         [] ->
-            % Its posisble that a monitor got a decref
+            % Its posisble that a monitor got a cancel
             % message before an 'EXIT' message when we're
             % closing idle databases. This could put an
             % entry into ?IDLE that we have to ignore
@@ -337,31 +337,24 @@ close_idle_db(DbName) when is_binary(DbName) ->
     end.
 
 
-close_idle_db(DbName, #db{compactor_pid = Pid}, _Monitor)
+close_idle_db(DbName, #db{compactor_pid = Pid})
         when Pid /= nil ->
     close_idle_db(ets:next(?IDLE, DbName));
 
-close_idle_db(DbName, #db{waiting_delayed_commit = WDC}, _Monitor)
+close_idle_db(DbName, #db{waiting_delayed_commit = WDC})
         when WDC /= nil ->
     close_idle_db(ets:next(?IDLE, DbName));
 
-close_idle_db(DbName, Db, Monitor) ->
-    % Turn off messages to the monitor so that we
-    % know that no more clients will send requests
-    % to it
-    true = ets:update_element(?DBS, DbName, {#entry.status, inactive}),
-    % TODO: Need to change this to something like "close_if_idle"
-    % so that the monitor will tell any new clients to retry before
-    % exiting when it gets the 'DOWN' message from Db#db.main_pid
-    case couch_db_monitor:close_if_idle(Monitor, [unmonitored]) of
-        closing ->
+close_idle_db(DbName, Db) ->
+    case ets:select_delete(?COUNTERS, [{{DbName, 0}, [], [true]}]) of
+        1 ->
             gen_server:cast(Db#db.fd, close),
             exit(Db#db.main_pid, kill),
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, Db#db.main_pid),
             true = ets:delete(?IDLE, DbName);
-        not_idle ->
-            true = ets:update_element(?DBS, DbName, {#entry.status, active}),
+        0 ->
+            true = ets:delete(?IDLE, DbName),
             close_idle_db(ets:next(?IDLE, DbName))
     end.
 
@@ -427,10 +420,6 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
         waiters = Waiters
     } = Entry,
     ok = couch_db_monitor:set_db_pid(Monitor, Db#db.main_pid),
-    lists:foreach(fun(From) ->
-        ok = couch_db_monitor:incref(Monitor, From, [unmonitored]),
-        gen_server:reply(From, {ok, Db#db{fd_monitor = Monitor}})
-    end, Waiters),
     % Cancel the creation request if it exists.
     case ReqType of
         {create, DbName, _Options, CrFrom} ->
@@ -446,6 +435,14 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     },
     true = ets:insert(?DBS, NewEntry),
     true = ets:insert(?PIDS, {Db#db.main_pid, DbName}),
+    true = ets:insert(?COUNTERS, {DbName, 0}),
+
+    lists:foreach(fun(From) ->
+        ok = incref(DbName),
+        ok = couch_db_monitor:notify(Monitor, From),
+        gen_server:reply(From, {ok, Db#db{fd_monitor = Monitor}})
+    end, Waiters),
+
     {reply, ok, Server};
 handle_call({open_result, T0, DbName, {error, eexist}}, From, Server) ->
     handle_call({open_result, T0, DbName, file_exists}, From, Server);
@@ -460,6 +457,7 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
     [gen_server:reply(From, Error) || From <- Waiters],
     ok = couch_db_monitor:close(Monitor),
     couch_log:info("open_result error ~p for ~s", [Error, DbName]),
+    true = ets:delete(?COUNTERS, DbName),
     true = ets:delete(?DBS, DbName),
     true = ets:delete(?PIDS, FromPid),
     true = ets:delete(?IDLE, DbName),
@@ -501,7 +499,8 @@ handle_call({open, DbName, Options}, From, Server) ->
                 db = Db,
                 monitor = Monitor
             } = Entry,
-            ok = couch_db_monitor:incref(Monitor, From, [unmonitored]),
+            ok = incref(DbName),
+            ok = couch_db_monitor:notify(Monitor, From),
             {reply, {ok, Db#db{fd_monitor = Monitor}}, Server}
         end
     end;
@@ -540,6 +539,7 @@ handle_call({delete, DbName, Options}, _From, Server) ->
                 db = Db,
                 waiters = Waiters
             } = Entry,
+            true = ets:delete(?COUNTERS, DbName),
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, Db#db.main_pid),
             true = ets:delete(?IDLE, DbName),
@@ -611,6 +611,7 @@ handle_info({'EXIT', Pid, Reason}, Server) ->
         if not is_list(Waiters) -> ok; true ->
             [gen_server:reply(From, Reason) || From <- Waiters]
         end,
+        true = ets:delete(?COUNTERS, DbName),
         true = ets:delete(?DBS, DbName),
         true = ets:delete(?PIDS, Pid),
         true = ets:delete(?IDLE, DbName),
@@ -634,6 +635,15 @@ db_closed(Server, Options) ->
     case lists:member(sys_db, Options) of
         false -> Server#server{dbs_open=Server#server.dbs_open - 1};
         true -> Server
+    end.
+
+
+incref(DbName) ->
+    case (catch ets:update_counter(?COUNTERS, DbName, 1)) of
+        N when is_integer(N), N > 0 ->
+            ok;
+        _ ->
+            error
     end.
 
 
