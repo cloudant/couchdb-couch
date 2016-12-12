@@ -20,7 +20,6 @@
 -export([init/1, handle_call/3,sup_start_link/0]).
 -export([handle_cast/2,code_change/3,handle_info/2,terminate/2]).
 -export([dev_start/0,is_admin/2,has_admins/0,get_stats/0]).
--export([cancel_monitor/2]).
 
 % config_listener api
 -export([handle_config_change/5, handle_config_terminate/3]).
@@ -40,6 +39,7 @@
     root_dir = [],
     max_dbs_open=?MAX_DBS_OPEN,
     dbs_open=0,
+    sys_dbs_open=0,
     start_time=""
     }).
 
@@ -96,7 +96,7 @@ open(DbName, Options0) ->
         ok = couch_db_monitor:notify(Monitor),
         {ok, Db#db{
             user_ctx = Ctx,
-            fd_monitor = Monitor
+            fd_monitor = {self(), Monitor, couch_db:is_system_db(Db)}
         }};
     _ ->
         Timeout = couch_util:get_value(timeout, Options, infinity),
@@ -104,7 +104,6 @@ open(DbName, Options0) ->
         OpenOpts = [{timestamp, os:timestamp()} | Options],
         case gen_server:call(couch_server, {open, DbName, OpenOpts}, Timeout) of
         {ok, #db{} = Db} ->
-            true = is_process_alive(Db#db.fd_monitor),
             {ok, Db#db{user_ctx = Ctx}};
         {not_found, no_db_file} when Create ->
             couch_log:warning("creating missing database: ~s", [DbName]),
@@ -118,7 +117,6 @@ create(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
     case gen_server:call(couch_server, {create, DbName, Options}, infinity) of
     {ok, #db{} = Db} ->
-        true = is_process_alive(Db#db.fd_monitor),
         Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
         {ok, Db#db{user_ctx = Ctx}};
     Error ->
@@ -187,16 +185,6 @@ hash_admin_passwords(Persist) ->
             HashedPassword = couch_passwords:hash_admin_password(ClearPassword),
             config:set("admins", User, ?b2l(HashedPassword), Persist)
         end, couch_passwords:get_unhashed_admins()).
-
-cancel_monitor(DbName, Monitor) ->
-    couch_db_monitor:cancel(Monitor),
-    case (catch ets:update_counter(?COUNTERS, DbName, -1)) of
-        0 ->
-            true = ets:insert(?IDLE, {DbName}),
-            ok;
-        _ ->
-            ok
-    end.
 
 init([]) ->
     % read config and register for configuration changes
@@ -324,32 +312,29 @@ close_idle_db('$end_of_table') ->
 
 close_idle_db(DbName) when is_binary(DbName) ->
     case ets:lookup(?DBS, DbName) of
-        [#entry{status = active, db = Db}] ->
-            close_idle_db(DbName, Db);
+        [#entry{status = active, db = Db, monitor = Monitor}] ->
+            close_idle_db(DbName, Db, Monitor);
         [] ->
-            % Its posisble that a monitor got a cancel
-            % message before an 'EXIT' message when we're
-            % closing idle databases. This could put an
-            % entry into ?IDLE that we have to ignore
-            % here.
             true = ets:delete(?IDLE, DbName),
             close_idle_db(ets:next(?IDLE, DbName))
     end.
 
 
-close_idle_db(DbName, #db{compactor_pid = Pid})
+close_idle_db(DbName, #db{compactor_pid = Pid}, _Monitor)
         when Pid /= nil ->
     close_idle_db(ets:next(?IDLE, DbName));
 
-close_idle_db(DbName, #db{waiting_delayed_commit = WDC})
+close_idle_db(DbName, #db{waiting_delayed_commit = WDC}, _Monitor)
         when WDC /= nil ->
     close_idle_db(ets:next(?IDLE, DbName));
 
-close_idle_db(DbName, Db) ->
+close_idle_db(DbName, Db, Monitor) ->
     case ets:select_delete(?COUNTERS, [{{DbName, 0}, [], [true]}]) of
         1 ->
+            put(last_db_closed, DbName),
             gen_server:cast(Db#db.fd, close),
             exit(Db#db.main_pid, kill),
+            exit(Monitor, kill),
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, Db#db.main_pid),
             true = ets:delete(?IDLE, DbName);
@@ -400,7 +385,15 @@ open_async(Server, From, DbName, Options) ->
     },
     true = ets:insert(?DBS, Entry),
     true = ets:insert(?PIDS, {Opener, DbName}),
-    db_opened(Server, Options).
+    NewServer = db_opened(Server, Options),
+    TotalOpen = NewServer#server.dbs_open + NewServer#server.sys_dbs_open,
+    case ets:info(?DBS, size) of
+        TotalOpen ->
+            ok;
+        Size ->
+            exit({dbs_open_mismatch, Size, TotalOpen, get(last_db_closed)})
+    end,
+    NewServer.
 
 handle_call(open_dbs_count, _From, Server) ->
     {reply, Server#server.dbs_open, Server};
@@ -438,9 +431,11 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     true = ets:insert(?COUNTERS, {DbName, 0}),
 
     lists:foreach(fun(From) ->
+        {Client, _} = From,
         ok = incref(DbName),
-        ok = couch_db_monitor:notify(Monitor, From),
-        gen_server:reply(From, {ok, Db#db{fd_monitor = Monitor}})
+        ok = couch_db_monitor:notify(Monitor, Client),
+        ClientMon = {Client, Monitor, couch_db:is_system_db(Db)},
+        gen_server:reply(From, {ok, Db#db{fd_monitor = ClientMon}})
     end, Waiters),
 
     {reply, ok, Server};
@@ -500,8 +495,10 @@ handle_call({open, DbName, Options}, From, Server) ->
                 monitor = Monitor
             } = Entry,
             ok = incref(DbName),
-            ok = couch_db_monitor:notify(Monitor, From),
-            {reply, {ok, Db#db{fd_monitor = Monitor}}, Server}
+            {Client, _} = From,
+            ok = couch_db_monitor:notify(Monitor, Client),
+            ClientMon = {Client, Monitor, couch_db:is_system_db(Db)},
+            {reply, {ok, Db#db{fd_monitor = ClientMon}}, Server}
         end
     end;
 handle_call({create, DbName, Options}, From, Server) ->
@@ -628,22 +625,27 @@ handle_info(Info, Server) ->
 db_opened(Server, Options) ->
     case lists:member(sys_db, Options) of
         false -> Server#server{dbs_open=Server#server.dbs_open + 1};
-        true -> Server
+        true -> Server#server{sys_dbs_open=Server#server.sys_dbs_open + 1}
     end.
 
 db_closed(Server, Options) ->
     case lists:member(sys_db, Options) of
         false -> Server#server{dbs_open=Server#server.dbs_open - 1};
-        true -> Server
+        true -> Server#server{sys_dbs_open=Server#server.sys_dbs_open - 1}
     end.
 
 
 incref(DbName) ->
     case (catch ets:update_counter(?COUNTERS, DbName, 1)) of
+        1 ->
+            ets:delete(?IDLE, DbName),
+            ok;
         N when is_integer(N), N > 0 ->
             ok;
-        _ ->
-            error
+        N when is_integer(N) ->
+            {invalid_refcount, N};
+        {'EXIT', {badarg, _}} ->
+            missing_counter
     end.
 
 

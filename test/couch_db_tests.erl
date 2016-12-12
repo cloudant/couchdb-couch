@@ -44,10 +44,12 @@ open_db_test_()->
         "Database open tests",
         {
             setup,
-            fun setup/0, fun test_util:stop_couch/1,
-            fun(_) ->
-                [should_create_db_if_missing()]
-            end
+            fun setup/0,
+            fun test_util:stop_couch/1,
+            [
+                fun should_create_db_if_missing/0,
+                fun should_have_db_return_to_idle/0
+            ]
         }
     }.
 
@@ -115,7 +117,40 @@ should_create_db_if_missing() ->
     {ok, Db} = couch_db:open(DbName, [{create_if_missing, true}]),
     ok = couch_db:close(Db),
     {ok, AllDbs} = couch_server:all_databases(),
-    ?_assert(lists:member(DbName, AllDbs)).
+    ?assert(lists:member(DbName, AllDbs)).
+
+should_have_db_return_to_idle() ->
+    DbName = ?tempdb(),
+    {ok, Db0} = couch_db:create(DbName, []),
+    ?assertEqual([], ets:lookup(couch_dbs_idle, DbName)),
+    couch_db:close(Db0),
+    ?assertEqual([{DbName}], ets:lookup(couch_dbs_idle, DbName)),
+    lists:foreach(fun(_) ->
+        {ok, Db1} = couch_db:open_int(DbName, []),
+        couch_db:close(Db1),
+        {_, Ref1} = spawn_monitor(fun() ->
+            {ok, _Db2} = couch_db:open_int(DbName, [])
+        end),
+        receive {'DOWN', Ref1, _, _, _} -> ok end,
+        {_, Ref2} = spawn_monitor(fun() ->
+            {ok, Db2} = couch_db:open_int(DbName, []),
+            couch_db:close(Db2)
+        end),
+        receive {'DOWN', Ref2, _, _, _} -> ok end,
+        {_, Ref3} = spawn_monitor(fun() ->
+            {ok, Db3} = couch_db:open_int(DbName, []),
+            {ok, _Db4} = couch_db:reopen(Db3)
+        end),
+        receive {'DOWN', Ref3, _, _, _} -> ok end,
+        {ok, Db5} = couch_db:open_int(DbName, []),
+        {_, Ref4} = spawn_monitor(fun() ->
+            couch_db:close(Db5)
+        end),
+        receive {'DOWN', Ref4, _, _, _} -> ok end,
+        couch_db:close(Db5)
+    end, lists:seq(1, 10)),
+    timer:sleep(500),
+    ?assertEqual([{DbName}], ets:lookup(couch_dbs_idle, DbName)).
 
 loop(_, 0) ->
     true;

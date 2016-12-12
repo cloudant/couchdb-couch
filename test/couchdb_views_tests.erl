@@ -533,7 +533,7 @@ count_users(DbName) ->
     % -1 to account for the new couch_db_monitor. All
     % of the tests that use this for an assertion are
     % silly.
-    length(lists:usort(Monitors) -- [self()]) - 1.
+    length(lists:usort(Monitors) -- [self(), Db#db.fd_monitor]).
 
 count_index_files(DbName) ->
     % call server to fetch the index files

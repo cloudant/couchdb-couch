@@ -222,6 +222,10 @@ handle_request(MochiReq, DefaultFun, UrlHandlers, DbUrlHandlers,
 handle_request_int(MochiReq, DefaultFun,
             UrlHandlers, DbUrlHandlers, DesignUrlHandlers) ->
     Begin = os:timestamp(),
+
+    erlang:put(dont_log_request, true),
+    erlang:put(dont_log_response, true),
+
     % for the path, use the raw path with the query string and fragment
     % removed, but URL quoting left intact
     RawUri = MochiReq:get(raw_path),

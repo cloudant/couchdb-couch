@@ -20,7 +20,7 @@
 
     notify/1,
     notify/2,
-    cancel/1
+    cancel/2
 ]).
 
 -export([
@@ -67,8 +67,21 @@ notify(Monitor, {Client, _}) when is_pid(Client) ->
     notify(Monitor, Client).
 
 
-cancel(Monitor) ->
-    Monitor ! {cancel, self()}.
+cancel(DbName, {Client, Monitor, IsSysDb})
+        when Client == self(), is_pid(Monitor) ->
+    Monitor ! {cancel, self()},
+    case (catch ets:update_counter(?COUNTERS, DbName, -1)) of
+        0 when not IsSysDb ->
+            true = ets:insert(?IDLE, {DbName}),
+            ok;
+        _ ->
+            ok
+    end;
+
+% This happens if a #db{} record is shared across processes
+% like fabric does with fabric_util:get_db/2
+cancel(_DbName, {Client, Monitor, _}) when is_pid(Client), is_pid(Monitor) ->
+    ok.
 
 
 init(DbName, IsSysDb) ->
@@ -120,12 +133,7 @@ handle_info({cancel, Client}, St) when is_pid(Client) ->
             khash:del(St#st.client_refs, Client),
             maybe_set_idle(St);
         {Ref, Count} when is_reference(Ref), is_integer(Count), Count > 1 ->
-            khash:put(St#st.client_refs, Client, {Ref, Count - 1});
-        undefined ->
-            % Ignore for now, most likely this is from
-            % fabric:get_security/1 which shares a db record
-            % between processes
-            ok
+            khash:put(St#st.client_refs, Client, {Ref, Count - 1})
     end,
     {noreply, St};
 
