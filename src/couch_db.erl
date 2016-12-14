@@ -872,7 +872,7 @@ new_revid(#doc{body=Body0, revs={OldStart,OldRevs}, atts=Atts, deleted=Deleted})
         {summary, [_Len, _Md5, BodyAtts], _SizeInfo, _AttsFd} ->
             {CompBody, _CompAtts} = binary_to_term(BodyAtts),
             couch_compress:decompress(CompBody);
-        {symmary, [_Len, BodyAtts], _SizeInfo, _AttsFd} ->
+        {summary, [_Len, BodyAtts], _SizeInfo, _AttsFd} ->
             {CompBody, _CompAtts} = binary_to_term(BodyAtts),
             couch_compress:decompress(CompBody);
         Else ->
