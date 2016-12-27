@@ -530,10 +530,10 @@ count_users(DbName) ->
     {ok, Db} = couch_db:open_int(DbName, [?ADMIN_CTX]),
     {monitored_by, Monitors} = erlang:process_info(Db#db.main_pid, monitored_by),
     ok = couch_db:close(Db),
-    % -1 to account for the new couch_db_monitor. All
-    % of the tests that use this for an assertion are
-    % silly.
-    length(lists:usort(Monitors) -- [self(), Db#db.fd_monitor]).
+    % Account for the new couch_db_monitor pid
+    % that monitors the main_pid as well
+    MonitorPid = element(2, Db#db.fd_monitor),
+    length(lists:usort(Monitors) -- [self(), MonitorPid]).
 
 count_index_files(DbName) ->
     % call server to fetch the index files
