@@ -68,26 +68,27 @@ decref_test() ->
 
 decref_copy_test() ->
     Self = self(),
+    MsgRef = erlang:make_ref(),
     {ok, RefCnt} = couch_refcnt:create(),
     Pid = spawn(fun() ->
         {ok, 1} = couch_refcnt:get_count(RefCnt),
-        Self ! inited,
+        Self ! {MsgRef, inited},
         receive ok -> ok end,
         try couch_refcnt:get_count(RefCnt) of
-            N -> Self ! N
+            N -> Self ! {MsgRef, N}
         catch error:badarg ->
-            Self ! badarg
+            Self ! {MsgRef, badarg}
         end
     end),
     receive
-        inited -> ok
+        {MsgRef, inited} -> ok
     after ?TIMEOUT ->
         erlang:error(timeout)
     end,
     ok = couch_refcnt:decref(RefCnt),
     Pid ! ok,
     Msg = receive
-        M -> M
+        {MsgRef, M} -> M
     after ?TIMEOUT ->
         erlang:error(timeout)
     end,
@@ -96,27 +97,28 @@ decref_copy_test() ->
 
 decref_isolation_test() ->
     Self = self(),
+    MsgRef = erlang:make_ref(),
     {ok, RefCnt1} = couch_refcnt:create(),
     Pid = spawn(fun() ->
         {ok, RefCnt2} = couch_refcnt:incref(RefCnt1),
         {ok, 2} = couch_refcnt:get_count(RefCnt2),
-        Self ! inited,
+        Self ! {MsgRef, inited},
         receive ok -> ok end,
         try couch_refcnt:get_count(RefCnt2) of
-            N -> Self ! N
+            N -> Self ! {MsgRef, N}
         catch error:badarg ->
             Self ! badarg
         end
     end),
     receive
-        inited -> ok
+        {MsgRef, inited} -> ok
     after ?TIMEOUT ->
         erlang:error(timeout)
     end,
     ok = couch_refcnt:decref(RefCnt1),
     Pid ! ok,
     Msg = receive
-        M -> M
+        {MsgRef, M} -> M
     after ?TIMEOUT ->
         erlang:error(timeout)
     end,

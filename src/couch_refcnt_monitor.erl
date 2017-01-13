@@ -15,7 +15,7 @@
 
 
 -export([
-    spawn_link/2,
+    spawn_link/3,
     close/1,
 
     set_refcnt/2,
@@ -24,7 +24,7 @@
 
 -export([
     init/1,
-    temrinate/2,
+    terminate/2,
     handle_call/3,
     handle_cast/2,
     handle_info/2,
@@ -36,6 +36,7 @@
     name,
     update_idle,
     table,
+    refcnt,
     mon_ref
 }).
 
@@ -60,12 +61,12 @@ init({Name, UpdateIdle, IdleTable}) ->
     St = #st{
         name = Name,
         update_idle = UpdateIdle,
-        IdleTable = IdleTable
+        table = IdleTable
     },
     gen_server:enter_loop(?MODULE, [], St).
 
 
-terminate(_Reason, _St) ->
+terminate(_Reason, St) ->
     true = ets:delete(St#st.table, St#st.name),
     ok.
 
@@ -80,12 +81,12 @@ handle_cast(close, St) ->
 handle_cast({set_refcnt, RefCnt}, #st{refcnt = undefined} = St) ->
     {noreply, St#st{refcnt = RefCnt}};
 
-handle_cast({set_mon_pid, Pid}, #st{ref = Ref} = St) ->
+handle_cast({set_mon_pid, Pid}, #st{mon_ref = Ref} = St) ->
     if not is_reference(Ref) -> ok; true ->
         erlang:demonitor(Ref, [flush])
     end,
-    NewRef = erlang:monitor(process, Pid)
-    {noreply, St#st{ref = NewRef}}.
+    NewRef = erlang:monitor(process, Pid),
+    {noreply, St#st{mon_ref = NewRef}}.
 
 
 handle_info({refcnt, _}, #st{update_idle = true} = St) ->
@@ -96,14 +97,17 @@ handle_info({refcnt, _}, #st{update_idle = true} = St) ->
     } = St,
     case couch_refcnt:get_count(RefCnt) of
         {ok, 1} ->
-            true = ets:delete(Table, Name);
+            true = ets:insert(Table, {Name});
         {ok, _} ->
-            true = ets:insert(Table, {Name})
+            true = ets:delete(Table, Name)
     end,
     {noreply, St};
 
 handle_info({refcnt, _}, St) ->
-    {noreply, St}.
+    {noreply, St};
+
+handle_info({'DOWN', Ref, _, _, _}, #st{mon_ref = Ref} = St) ->
+    {stop, normal, St}.
 
 
 code_change(_Vsn, St, _Extra) ->

@@ -87,7 +87,7 @@ open(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
     Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
     case ets:lookup(?DBS, DbName) of
-        [#entry{status = active, refcnt = RefCnt}] ->
+        [#entry{status = active, db = Db, refcnt = RefCnt}] ->
             case couch_refcnt:incref(RefCnt) of
                 {ok, ClientRefCnt} ->
                     {ok, Db#db{
@@ -447,8 +447,8 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
 
             lists:foreach(fun(From) ->
                 {Client, _} = From,
-                {ok, RefCnt} = couch_refcnt:incref(RefCnt)
-                ClientMon = {Client, RefCnt},
+                {ok, ClientRefCnt} = couch_refcnt:incref(RefCnt),
+                ClientMon = {Client, ClientRefCnt},
                 gen_server:reply(From, {ok, Db#db{fd_monitor = ClientMon}})
             end, Waiters),
 
@@ -523,7 +523,7 @@ handle_call({create, DbName, Options}, From, Server) ->
         CloseError ->
             {reply, CloseError, Server}
         end;
-    [#entry{status = inactive, req_type = open} = Entry] ->
+    [#entry{status = inactive, req_type = open}] ->
         % We're trying to create a database while someone is in
         % the middle of trying to open it. We allow one creator
         % to wait while we figure out if it'll succeed.

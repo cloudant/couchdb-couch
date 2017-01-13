@@ -120,7 +120,7 @@ ensure_full_commit(Db, RequiredSeq) ->
     ok = gen_server:call(Pid, {full_commit, RequiredSeq}, infinity),
     {ok, StartTime}.
 
-close(#db{fd_monitor = {Client, RefCnt}} = Db) when Client == self() ->
+close(#db{fd_monitor = {Client, RefCnt}}) when Client == self() ->
     catch couch_refcnt:decref(RefCnt),
     ok;
 close(#db{}) ->

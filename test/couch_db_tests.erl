@@ -124,6 +124,7 @@ should_have_db_return_to_idle() ->
     {ok, Db0} = couch_db:create(DbName, []),
     ?assertEqual([], ets:lookup(couch_dbs_idle, DbName)),
     couch_db:close(Db0),
+    timer:sleep(100),
     ?assertEqual([{DbName}], ets:lookup(couch_dbs_idle, DbName)),
     lists:foreach(fun(_) ->
         {ok, Db1} = couch_db:open_int(DbName, []),
