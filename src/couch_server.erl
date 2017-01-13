@@ -28,7 +28,6 @@
 
 -define(DBS, couch_dbs).
 -define(PIDS, couch_dbs_pid_to_name).
--define(COUNTERS, couch_dbs_counters).
 -define(IDLE, couch_dbs_idle).
 
 -define(MAX_DBS_OPEN, 5000).
@@ -46,6 +45,7 @@
 -record(entry, {
     dbname,
     db,
+    refcnt,
     monitor,
     status,
     req_type,
@@ -86,32 +86,37 @@ sup_start_link() ->
 open(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
     Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
-    case incref(DbName) of
-    ok ->
-        [#entry{
-            db = Db,
-            monitor = Monitor,
-            status = active
-        }] = ets:lookup(?DBS, DbName),
-        ok = couch_db_monitor:notify(Monitor),
-        {ok, Db#db{
-            user_ctx = Ctx,
-            fd_monitor = {self(), Monitor, couch_db:is_system_db(Db)}
-        }};
-    _ ->
-        Timeout = couch_util:get_value(timeout, Options, infinity),
-        Create = couch_util:get_value(create_if_missing, Options, false),
-        OpenOpts = [{timestamp, os:timestamp()} | Options],
-        case gen_server:call(couch_server, {open, DbName, OpenOpts}, Timeout) of
+    case ets:lookup(?DBS, DbName) of
+        [#entry{status = active, refcnt = RefCnt}] ->
+            case couch_refcnt:incref(RefCnt) of
+                {ok, ClientRefCnt} ->
+                    {ok, Db#db{
+                        user_ctx = Ctx,
+                        fd_monitor = {self(), ClientRefCnt}
+                    }};
+                closed ->
+                    open_call(DbName, Options)
+            end;
+        _ ->
+            open_call(DbName, Options)
+    end.
+
+
+open_call(DbName, Options) ->
+    Timeout = couch_util:get_value(timeout, Options, infinity),
+    Create = couch_util:get_value(create_if_missing, Options, false),
+    OpenOpts = [{timestmap, os:timestamp()} | Options],
+    case gen_server:call(couch_server, {open, DbName, OpenOpts}, Timeout) of
         {ok, #db{} = Db} ->
+            Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
             {ok, Db#db{user_ctx = Ctx}};
         {not_found, no_db_file} when Create ->
             couch_log:warning("creating missing database: ~s", [DbName]),
             couch_server:create(DbName, Options);
         Error ->
             Error
-        end
     end.
+
 
 create(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
@@ -205,19 +210,13 @@ init([]) ->
             {read_concurrency, true},
             {keypos, #entry.dbname}
         ]),
-    ets:new(?COUNTERS, [
-            set,
-            public,
-            named_table,
-            {write_concurrency, true}
-        ]),
+    ets:new(?PIDS, [set, protected, named_table]),
     ets:new(?IDLE, [
             set,
             public,
             named_table,
             {write_concurrency, true}
         ]),
-    ets:new(?PIDS, [set, protected, named_table]),
     process_flag(trap_exit, true),
     {ok, #server{root_dir=RootDir,
                 max_dbs_open=MaxDbsOpen,
@@ -328,33 +327,32 @@ close_idle_db('$end_of_table') ->
 
 close_idle_db(DbName) when is_binary(DbName) ->
     case ets:lookup(?DBS, DbName) of
-        [#entry{status = active, db = Db, monitor = Monitor}] ->
-            close_idle_db(DbName, Db, Monitor);
+        [#entry{status = active, db = Db, refcnt = RefCnt}] ->
+            close_idle_db(DbName, Db, RefCnt);
         [] ->
             true = ets:delete(?IDLE, DbName),
             close_idle_db(ets:next(?IDLE, DbName))
     end.
 
 
-close_idle_db(DbName, #db{compactor_pid = Pid}, _Monitor)
+close_idle_db(DbName, #db{compactor_pid = Pid}, _RefCnt)
         when Pid /= nil ->
     close_idle_db(ets:next(?IDLE, DbName));
 
-close_idle_db(DbName, #db{waiting_delayed_commit = WDC}, _Monitor)
+close_idle_db(DbName, #db{waiting_delayed_commit = WDC}, _RefCnt)
         when WDC /= nil ->
     close_idle_db(ets:next(?IDLE, DbName));
 
-close_idle_db(DbName, Db, Monitor) ->
-    case ets:select_delete(?COUNTERS, [{{DbName, 0}, [], [true]}]) of
-        1 ->
+close_idle_db(DbName, Db, RefCnt) ->
+    case couch_refcnt:close_if(RefCnt, 1) of
+        ok ->
             put(last_db_closed, DbName),
             gen_server:cast(Db#db.fd, close),
             exit(Db#db.main_pid, kill),
-            exit(Monitor, kill),
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, Db#db.main_pid),
             true = ets:delete(?IDLE, DbName);
-        0 ->
+        no_match ->
             true = ets:delete(?IDLE, DbName),
             close_idle_db(ets:next(?IDLE, DbName))
     end.
@@ -386,6 +384,9 @@ open_async(Server, From, DbName, Options) ->
         false -> open
     end,
     IsSysDb = lists:member(sys_db, Options),
+    Monitor = couch_refcnt_monitor:spawn_link(DbName, not IsSysDb, ?IDLE),
+    {ok, RefCnt} = couch_refcnt:create(Monitor),
+    couch_refcnt_monitor:set_refcnt(Monitor, RefCnt),
     Entry = #entry{
         dbname = DbName,
         db = #db{
@@ -394,22 +395,15 @@ open_async(Server, From, DbName, Options) ->
             header = undefined,
             options = Options
         },
-        monitor = couch_db_monitor:spawn_link(DbName, IsSysDb),
+        refcnt = RefCnt,
+        monitor = Monitor,
         status = inactive,
         req_type = ReqType,
         waiters = [From]
     },
     true = ets:insert(?DBS, Entry),
     true = ets:insert(?PIDS, {Opener, DbName}),
-    NewServer = db_opened(Server, Options),
-    TotalOpen = NewServer#server.dbs_open + NewServer#server.sys_dbs_open,
-    case ets:info(?DBS, size) of
-        TotalOpen ->
-            ok;
-        Size ->
-            exit({dbs_open_mismatch, Size, TotalOpen, get(last_db_closed)})
-    end,
-    NewServer.
+    db_opened(Server, Options).
 
 handle_call(open_dbs_count, _From, Server) ->
     {reply, Server#server.dbs_open, Server};
@@ -429,11 +423,12 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
         [#entry{status = inactive} = Entry] ->
             link(Db#db.main_pid),
             #entry{
+                refcnt = RefCnt,
                 monitor = Monitor,
                 req_type = ReqType,
                 waiters = Waiters
             } = Entry,
-            ok = couch_db_monitor:set_db_pid(Monitor, Db#db.main_pid),
+            ok = couch_refcnt_monitor:set_mon_pid(Monitor, Db#db.main_pid),
             % Cancel the creation request if it exists.
             case ReqType of
                 {create, DbName, _Options, CrFrom} ->
@@ -449,13 +444,11 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
             },
             true = ets:insert(?DBS, NewEntry),
             true = ets:insert(?PIDS, {Db#db.main_pid, DbName}),
-            true = ets:insert(?COUNTERS, {DbName, 0}),
 
             lists:foreach(fun(From) ->
                 {Client, _} = From,
-                ok = incref(DbName),
-                ok = couch_db_monitor:notify(Monitor, Client),
-                ClientMon = {Client, Monitor, couch_db:is_system_db(Db)},
+                {ok, RefCnt} = couch_refcnt:incref(RefCnt)
+                ClientMon = {Client, RefCnt},
                 gen_server:reply(From, {ok, Db#db{fd_monitor = ClientMon}})
             end, Waiters),
 
@@ -476,9 +469,8 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
                 waiters = Waiters
             } = Entry,
             [gen_server:reply(From, Error) || From <- Waiters],
-            ok = couch_db_monitor:close(Monitor),
+            ok = couch_refcnt_monitor:close(Monitor),
             couch_log:info("open_result error ~p for ~s", [Error, DbName]),
-            true = ets:delete(?COUNTERS, DbName),
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, FromPid),
             true = ets:delete(?IDLE, DbName),
@@ -504,27 +496,21 @@ handle_call({open, DbName, Options}, From, Server) ->
                 {reply, CloseError, Server}
             end;
         [#entry{status = inactive} = Entry] ->
-            #entry{
-                waiters = Waiters
-            } = Entry,
-            NewEntry = Entry#entry{
-                waiters = [From | Waiters]
-            },
-            true = ets:insert(?DBS, NewEntry),
+            Waiters = [From | Entry#entry.waiters],
+            true = ets:update_element(?DBS, DbName, {#entry.waiters, Waiters}),
             if length(Waiters) =< 10 -> ok; true ->
                 Fmt = "~b clients waiting to open db ~s",
-                couch_log:info(Fmt, [length(Waiters) + 1, DbName])
+                couch_log:info(Fmt, [length(Waiters), DbName])
             end,
             {noreply, Server};
         [#entry{status = active} = Entry] ->
             #entry{
                 db = Db,
-                monitor = Monitor
+                refcnt = RefCnt
             } = Entry,
-            ok = incref(DbName),
             {Client, _} = From,
-            ok = couch_db_monitor:notify(Monitor, Client),
-            ClientMon = {Client, Monitor, couch_db:is_system_db(Db)},
+            {ok, ClientRefCnt} = couch_refcnt:incref(RefCnt),
+            ClientMon = {Client, ClientRefCnt},
             {reply, {ok, Db#db{fd_monitor = ClientMon}}, Server}
         end
     end;
@@ -541,11 +527,8 @@ handle_call({create, DbName, Options}, From, Server) ->
         % We're trying to create a database while someone is in
         % the middle of trying to open it. We allow one creator
         % to wait while we figure out if it'll succeed.
-        CrOptions = [create | Options],
-        NewEntry = Entry#entry{
-            req_type = {create, DbName, CrOptions, From}
-        },
-        true = ets:insert(?DBS, NewEntry),
+        Req = {create, DbName, [create | Options], From},
+        true = ets:update_element(?DBS, DbName, {#entry.req_type, Req}),
         {noreply, Server};
     [#entry{}] ->
         {reply, file_exists, Server}
@@ -558,12 +541,11 @@ handle_call({delete, DbName, Options}, _From, Server) ->
         Server2 =
         case ets:lookup(?DBS, DbName) of
         [] -> Server;
-        [#entry{waiters = Waiters} = Entry] ->
+        [#entry{} = Entry] ->
             #entry{
                 db = Db,
                 waiters = Waiters
             } = Entry,
-            true = ets:delete(?COUNTERS, DbName),
             true = ets:delete(?DBS, DbName),
             true = ets:delete(?PIDS, Db#db.main_pid),
             true = ets:delete(?IDLE, DbName),
@@ -635,7 +617,6 @@ handle_info({'EXIT', Pid, Reason}, Server) ->
         if not is_list(Waiters) -> ok; true ->
             [gen_server:reply(From, Reason) || From <- Waiters]
         end,
-        true = ets:delete(?COUNTERS, DbName),
         true = ets:delete(?DBS, DbName),
         true = ets:delete(?PIDS, Pid),
         true = ets:delete(?IDLE, DbName),
@@ -662,25 +643,11 @@ db_closed(Server, Options) ->
     end.
 
 
-incref(DbName) ->
-    case (catch ets:update_counter(?COUNTERS, DbName, 1)) of
-        1 ->
-            ets:delete(?IDLE, DbName),
-            ok;
-        N when is_integer(N), N > 0 ->
-            ok;
-        N when is_integer(N) ->
-            {invalid_refcount, N};
-        {'EXIT', {badarg, _}} ->
-            missing_counter
-    end.
-
-
 should_drop(Options) ->
     Timeout = couch_util:get_value(timeout, Options, infinity),
     Timestamp = couch_util:get_value(timestamp, Options, {0, 0, 0}),
     % Timeout is in millisecond, now_diff returns micro so we
-    % have to devide by 1000
+    % have to divide by 1000
     Diff = timer:now_diff(os:timestamp(), Timestamp) / 1000,
     Timeout /= infinity andalso Diff > (Timeout * 1.25).
 

@@ -120,8 +120,11 @@ ensure_full_commit(Db, RequiredSeq) ->
     ok = gen_server:call(Pid, {full_commit, RequiredSeq}, infinity),
     {ok, StartTime}.
 
-close(#db{fd_monitor = Monitor} = Db) ->
-    ok = couch_db_monitor:cancel(Db#db.name, Monitor).
+close(#db{fd_monitor = {Client, RefCnt}} = Db) when Client == self() ->
+    catch couch_refcnt:decref(RefCnt),
+    ok;
+close(#db{}) ->
+    ok.
 
 is_idle(#db{compactor_pid=nil, waiting_delayed_commit=nil} = Db) ->
     monitored_by(Db) == [];
