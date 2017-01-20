@@ -11,7 +11,7 @@
 % the License.
 
 -module(couch_msgq_buffer).
-
+-compile(native).
 
 -export([
     start_link/2
@@ -30,7 +30,8 @@
 ]).
 
 
--define(DEFAULT_RATE, 10000).
+-define(DEFAULT_RATE, 5000).
+-define(RATE_ADJ, 100).
 -define(WRITE_DEBUG, fun ?MODULE:write_debug/3).
 
 
@@ -48,6 +49,7 @@ start_link(Name, Target) ->
 
 
 init(Parent, Name, Target) ->
+    process_flag(priority, high),
     try register(Name, self()) of
         true ->
             proc_lib:init_ack(Parent, {ok, self()}),
@@ -82,32 +84,35 @@ loop(Parent, Debug, St) ->
             sys:handle_system_msg(Request, From, Parent, Name, Debug, St);
 
         Msg ->
-            InLoc = {in, loop, Msg},
-            Debug2 = sys:handle_debug(Debug, ?WRITE_DEBUG, Name, InLoc),
+            TargetPid = whereis(Target),
+
+            %%InLoc = {in, loop, Msg},
+            %%Debug2 = sys:handle_debug(Debug, ?WRITE_DEBUG, Name, InLoc),
 
             NewCount = 1 + (if NewSecond == Second -> Count; true -> 0 end),
-
-            if NewCount < Rate -> ok; true ->
+            NewRate = if NewCount < Rate -> Rate; true ->
                 SleepMilli = 1000 - (MicroSeconds div 1000),
-                timer:sleep(SleepMilli)
+                timer:sleep(SleepMilli),
+
+                case process_info(TargetPid, message_queue_len) of
+                    {_, 0} -> Rate + ?RATE_ADJ;
+                    {_, N} -> Rate - erlang:min(?RATE_ADJ, N)
+                end
             end,
 
-            case whereis(Target) of
-                Pid when is_pid(Pid) ->
-                    Pid ! Msg;
-                undefined ->
-                    % Drop the message?
-                    ok
-            end,
+            put(status, {NewCount, NewRate}),
 
-            OutLoc = {out, loop, Msg},
-            Debug3 = sys:handle_debug(Debug2, ?WRITE_DEBUG, Name, OutLoc),
+            TargetPid ! Msg,
+
+            %%OutLoc = {out, loop, Msg},
+            %%Debug3 = sys:handle_debug(Debug2, ?WRITE_DEBUG, Name, OutLoc),
 
             NewSt = St#st{
                 second = NewSecond,
-                count = NewCount
+                count = NewCount,
+                rate = NewRate
             },
-            loop(Parent, Debug3, NewSt)
+            loop(Parent, Debug, NewSt)
     end.
 
 
