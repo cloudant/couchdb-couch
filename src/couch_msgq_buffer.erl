@@ -82,7 +82,7 @@ loop(Parent, Debug, St) ->
             sys:handle_system_msg(Request, From, Parent, Name, Debug, St);
 
         Msg ->
-            InLoc = {in, handle, Msg},
+            InLoc = {in, loop, Msg},
             Debug2 = sys:handle_debug(Debug, ?WRITE_DEBUG, Name, InLoc),
 
             NewCount = 1 + (if NewSecond == Second -> Count; true -> 0 end),
@@ -100,7 +100,7 @@ loop(Parent, Debug, St) ->
                     ok
             end,
 
-            OutLoc = {out, handle, Msg},
+            OutLoc = {out, loop, Msg},
             Debug3 = sys:handle_debug(Debug2, ?WRITE_DEBUG, Name, OutLoc),
 
             NewSt = St#st{
