@@ -295,7 +295,7 @@ maybe_close_lru_db(#server{lru=Lru}=Server) ->
         {error, all_dbs_active}
     end.
 
-open_async(Server, From, DbName, Filepath, Options) ->
+open_async(Server, From, DbName, Options) ->
     Parent = self(),
     T0 = os:timestamp(),
     Opener = spawn_link(fun() ->
