@@ -92,12 +92,11 @@ cet_compact_with_everything() ->
         {purge, {<<"bar">>, BarRev#rev_info.rev}}
     ],
     {ok, St7} = test_engine_util:apply_actions(Engine, St6, Actions3),
-    {ok, PIdRevs7} = Engine:fold_purged_docs(St7, 0, fun fold_fun/3, [], []),
-    PurgedIdRevs = [
-        {<<"foo">>, [FooRev#rev_info.rev]},
-        {<<"bar">>, [BarRev#rev_info.rev]}
-    ],
-    ?assertEqual(PurgedIdRevs, lists:reverse(PIdRevs7)),
+    {ok, PIdRevs7} = Engine:fold_purged_docs(St7, 0, fun fold_fun/2, [], []),
+    ?assertEqual(
+        [{<<"foo">>, [FooRev#rev_info.rev]},{<<"bar">>, [BarRev#rev_info.rev]}],
+        lists:reverse(PIdRevs7)
+    ),
 
     [Att0, Att1, Att2, Att3, Att4] = test_engine_util:prep_atts(Engine, St7, [
             {<<"ohai.txt">>, crypto:rand_bytes(2048)},
@@ -127,9 +126,11 @@ cet_compact_with_everything() ->
     end),
 
     {ok, St11, undefined} = Engine:finish_compaction(St10, DbName, [], Term),
-    {ok, PIdRevs11} = Engine:fold_purged_docs(St11, 0, fun fold_fun/3, [], []),
-
-    ?assertEqual(PurgedIdRevs, lists:reverse(PIdRevs11)),
+    {ok, PIdRevs11} = Engine:fold_purged_docs(St11, 0, fun fold_fun/2, [], []),
+    ?assertEqual(
+        [{<<"foo">>, [FooRev#rev_info.rev]},{<<"bar">>, [BarRev#rev_info.rev]}],
+        lists:reverse(PIdRevs11)
+    ),
 
     Db2 = test_engine_util:db_as_term(Engine, St11),
     Diff = test_engine_util:term_diff(Db1, Db2),
@@ -208,7 +209,17 @@ cet_recompact_purge() ->
         {'$gen_cast', {compact_done, Engine, Term0}} ->
             Term0;
         {'DOWN', Ref, _, _, Reason} ->
-            erlang:error({compactor_died, Reason})
+            erlang:error({compactor_died, Reason});
+        {'$gen_call', {NewPid, Ref2}, get_disposable_purge_seq} ->
+            NewPid!{Ref2, {ok, 0}},
+            receive
+                {'$gen_cast', {compact_done, Engine, Term0}} ->
+                    Term0;
+                {'DOWN', Ref, _, _, Reason} ->
+                    erlang:error({compactor_died, Reason})
+                after 10000 ->
+                    erlang:error(compactor_timed_out)
+            end
         after 10000 ->
             erlang:error(compactor_timed_out)
     end,
@@ -221,51 +232,47 @@ cet_recompact_purge() ->
 
 
 cet_recompact_purged_docs_limit() ->
-    {ok, Engine, Path, St0} = test_engine_util:init_engine(dbpath),
-    {ok, St1} = Engine:set(St0, purged_docs_limit, 2),
+    {ok, Engine, Path, St1} = test_engine_util:init_engine(dbpath),
+    % create 1200 docs
+    NumDocs = 1200,
+    {RActions, RIds} = lists:foldl(fun(Id, {CActions, CIds}) ->
+        Id1 = docid(Id),
+        Action = {create, {Id1, [{<<"int">>, Id}]}},
+        {[Action| CActions], [Id1| CIds]}
+    end, {[], []}, lists:seq(1, NumDocs)),
+    Actions = lists:reverse(RActions),
+    Ids = lists:reverse(RIds),
+    {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions),
 
-    Actions1 = [
-        {create, {<<"foo">>, []}},
-        {create, {<<"bar">>, []}},
-        {conflict, {<<"bar">>, [{<<"vsn">>, 2}]}},
-        {create, {<<"baz">>, []}}
-    ],
-    {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions1),
-    {ok, St3, DbName, _, Term} = test_engine_util:compact(Engine, St2, Path),
+    % purge 1005 docs
+    FDIs = Engine:open_docs(St2, Ids),
+    RevActions2 = lists:foldl(fun(FDI, CActions) ->
+        Id = FDI#full_doc_info.id,
+        PrevRev = test_engine_util:prev_rev(FDI),
+        Rev = PrevRev#rev_info.rev,
+        [{purge, {Id, Rev}}| CActions]
+    end, [], FDIs),
+    {ok, St3} = test_engine_util:apply_actions(Engine, St2,
+        lists:reverse(RevActions2)),
 
-    % purging docs that exceeds purged_docs_limit before compaction finishes
-    [FooFDI, BarFDI, BazFDI] = Engine:open_docs(St3, [<<"foo">>, <<"bar">>, <<"baz">>]),
-    FooRev = test_engine_util:prev_rev(FooFDI),
-    BarRev = test_engine_util:prev_rev(BarFDI),
-    BazRev = test_engine_util:prev_rev(BazFDI),
-    Actions2 = [
-        {purge, {<<"foo">>, FooRev#rev_info.rev}},
-        {purge, {<<"bar">>, BarRev#rev_info.rev}},
-        {purge, {<<"baz">>, BazRev#rev_info.rev}}
-    ],
-    {ok, St4} = test_engine_util:apply_actions(Engine, St3, Actions2),
-    Db1 = test_engine_util:db_as_term(Engine, St4),
+    % check that before compaction all NumDocs of purge_requests
+    % are in purge_tree,
+    % even if NumDocs=1200 is greater than purged_docs_limit=1000
+    {ok, PurgedIdRevs} = Engine:fold_purged_docs(St3, 0, fun fold_fun/2, [], []),
+    ?assertEqual(1, Engine:get(St3, oldest_purge_seq)),
+    ?assertEqual(NumDocs, length(PurgedIdRevs)),
 
-    % Since purging a document will change the update_seq,
-    % finish_compaction will restart compaction in order to process
-    % the new updates
-    {ok, St5, CPid1} = Engine:finish_compaction(St4, DbName, [], Term),
-    ?assertEqual(true, is_pid(CPid1)),
-    Ref = erlang:monitor(process, CPid1),
-    NewTerm = receive
-        {'$gen_cast', {compact_done, Engine, Term0}} ->
-            Term0;
-        {'DOWN', Ref, _, _, Reason} ->
-            erlang:error({compactor_died, Reason})
-        after 10000 ->
-            erlang:error(compactor_timed_out)
-    end,
+    % compact db
+    {ok, St4, DbName, _, Term} = test_engine_util:compact(Engine, St3, Path),
+    {ok, St5, undefined} = Engine:finish_compaction(St4, DbName, [], Term),
 
-    {ok, St6, undefined} = Engine:finish_compaction(St5, DbName, [], NewTerm),
-    Db2 = test_engine_util:db_as_term(Engine, St6),
-
-    Diff = test_engine_util:term_diff(Db1, Db2),
-    ?assertEqual(nodiff, Diff).
+    % check that after compaction only purged_docs_limit purge_requests
+    % are in purge_tree
+    PurgedDocsLimit = Engine:get(St5, purged_docs_limit),
+    NewOldestPSeq = NumDocs - PurgedDocsLimit + 1,
+    {ok, PurgedIdRevs2} = Engine:fold_purged_docs(St5, NewOldestPSeq-1, fun fold_fun/2, [], []),
+    ?assertEqual(NewOldestPSeq, Engine:get(St5, oldest_purge_seq)),
+    ?assertEqual(PurgedDocsLimit, length(PurgedIdRevs2)).
 
 
 docid(I) ->
@@ -278,5 +285,5 @@ local_docid(I) ->
     iolist_to_binary(Str).
 
 
-fold_fun(_PurgeSeq, {Id, Revs}, Acc) ->
-    {ok, [{Id, Revs} | Acc]}.
+fold_fun({_PSeq, _UUID, Id, Revs}, Acc) ->
+    [{Id, Revs} | Acc].

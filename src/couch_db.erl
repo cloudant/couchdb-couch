@@ -27,7 +27,7 @@
 -export([get_missing_revs/2,name/1,get_update_seq/1,get_committed_update_seq/1]).
 -export([get_uuid/1, get_epochs/1, get_compacted_seq/1]).
 -export([get_instance_start_time/1]).
--export([get_purge_seq/1,purge_docs/2,get_oldest_purge_seq/1]).
+-export([get_purge_seq/1,purge_docs/2, purge_docs/3,get_oldest_purge_seq/1, open_purged_docs/2]).
 -export([get_purged_docs_limit/1, set_purged_docs_limit/2]).
 -export([start_link/4,open_doc_int/3,ensure_full_commit/1,ensure_full_commit/2]).
 -export([fold_docs/3, fold_docs/4]).
@@ -43,6 +43,7 @@
 -export([normalize_dbname/1]).
 -export([validate_dbname/1]).
 -export([dbname_suffix/1]).
+
 
 
 -export([is_db/1]).
@@ -313,37 +314,43 @@ get_full_doc_infos(Db, Ids) ->
     couch_db_engine:open_docs(Db, Ids).
 
 
--spec purge_docs(#db{}, [{Id, [Rev]}]) ->
-        {ok, {PurgeSeq, [Reply]}} | {error, purged_docs_limit_exceeded} when
+purge_docs(#db{main_pid=Pid}=Db, UUIdsIdsRevs) ->
+    purge_docs(#db{main_pid=Pid}=Db, UUIdsIdsRevs, interactive_edit).
+
+-spec purge_docs(#db{}, [{UUId, Id, [Rev]}], interactive_edit) ->
+        {ok, {PurgeSeq, [Reply]}} when
+    UUId     :: binary(),
     Id       :: binary(),
     Rev      :: {non_neg_integer(), binary()},
     PurgeSeq :: non_neg_integer(),
     Reply    :: {ok, []}
-              | {ok, [Rev]}
-              | {error, purge_during_compaction_exceeded_limit}.
-purge_docs(#db{main_pid=Pid}=Db, IdsRevs) ->
-    PDocsLimit = couch_db_engine:get(Db, purged_docs_limit),
-    if length(IdsRevs) > PDocsLimit ->
-        {error, purged_docs_limit_exceeded};
-    true ->
-        fold_purges(Pid, IdsRevs)
+              | {ok, [Rev]}.
+purge_docs(#db{main_pid=Pid}, UUIdsIdsRevs, interactive_edit) ->
+    gen_server:call(Pid, {purge_docs, UUIdsIdsRevs});
+
+purge_docs(#db{main_pid=Pid}=Db, UUIdsIdsRevs0, replicated_changes) ->
+    % filter out purge requests that have been already applied:
+    % their UUIDs exist in upurge_tree
+    UUIDs = [UUID || {UUID, _Id, _Revs} <- UUIdsIdsRevs0],
+    Results = open_purged_docs(Db, UUIDs),
+    UUIdsIdsRevs = lists:foldr(fun(
+        {not_found, UUIdIdrevs}, Acc0) -> [UUIdIdrevs|Acc0];
+        ({_, _}, Acc0) -> Acc0
+    end, [], lists:zip(Results, UUIdsIdsRevs0)),
+    case UUIdsIdsRevs of
+        [] -> ok;
+        _ -> gen_server:call(Pid, {purge_docs, UUIdsIdsRevs})
     end.
 
 
-fold_purges(Pid, IdsRevs) ->
-    fold_purges(Pid, IdsRevs, {0,[]}).
-fold_purges(_Pid, [], {PSeq, Replies})->
-    {ok, {PSeq, lists:reverse(Replies)}};
-fold_purges(Pid, [IdRevs| RestIdsRevs], {PSeq0, Replies})->
-    case gen_server:call(Pid, {purge_docs, IdRevs}) of
-        {ok, {PSeq, PRevs}} ->
-            NewReplies = [{ok, PRevs} | Replies],
-            fold_purges(Pid, RestIdsRevs, {PSeq, NewReplies});
-        {error, purge_during_compaction_exceeded_limit} = Error ->
-            % fill the current and rest of replies with error
-            ErrorReplies = lists:duplicate(length(RestIdsRevs) + 1, Error),
-            {ok, {PSeq0, lists:reverse(Replies) ++ ErrorReplies}}
-    end.
+-spec open_purged_docs(#db{}, [UUId]) -> [PurgedReq] when
+    UUId        :: binary(),
+    PurgedReq   :: {Id, [Rev]}
+                 | not_found,
+    Id          :: binary(),
+    Rev         :: {non_neg_integer(), binary()}.
+open_purged_docs(Db, UUIDs) ->
+    couch_db_engine:open_purged_docs(Db, UUIDs).
 
 
 set_purged_docs_limit(#db{main_pid=Pid}=Db, Limit)
@@ -943,6 +950,7 @@ doc_tag(#doc{meta=Meta}) ->
         Else -> throw({invalid_doc_tag, Else})
     end.
 
+
 update_docs(Db, Docs0, Options, replicated_changes) ->
     increment_stat(Db, [couchdb, database_writes]),
     Docs = tag_docs(Docs0),
@@ -1023,7 +1031,6 @@ update_docs(Db, Docs0, Options, interactive_edit) ->
                         check_dup_atts(Doc)))
                 || Doc <- B] || B <- DocBuckets2],
         {DocBuckets4, IdRevs} = new_revs(DocBuckets3, [], []),
-
         {ok, CommitResults} = write_and_commit(Db, DocBuckets4, NonRepDocs, Options2),
 
         ResultsDict = lists:foldl(fun({Key, Resp}, ResultsAcc) ->
@@ -1033,6 +1040,7 @@ update_docs(Db, Docs0, Options, interactive_edit) ->
             dict:fetch(doc_tag(Doc), ResultsDict)
         end, Docs)}
     end.
+
 
 % Returns the first available document on disk. Input list is a full rev path
 % for the doc.

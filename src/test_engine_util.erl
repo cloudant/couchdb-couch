@@ -135,8 +135,9 @@ apply_batch(Engine, St, [{purge, {Id, Revs}}]) ->
     case gen_write(Engine, St, {purge, {Id, Revs}}, UpdateSeq) of
         {_, _, purged_before}->
             St;
-        {Pair, _, PurgedIdRevs} ->
-            {ok, NewSt} = Engine:purge_doc_revs(St, Pair, PurgedIdRevs),
+        {Pair, _, {Id, PRevs}} ->
+            UUID = couch_uuids:new(),
+            {ok, NewSt} = Engine:purge_doc_revs(St, [Pair], [{UUID, Id, PRevs}]),
             NewSt
     end;
 
@@ -227,12 +228,12 @@ gen_write(Engine, St, {purge, {DocId, PrevRevs0, _}}, UpdateSeq) ->
     case Engine:open_docs(St, [DocId]) of
     [not_found] ->
         % Check if this doc has been purged before
-        FoldFun = fun(_PurgeSeq, {Id, _Revs}, _Acc) ->
+        FoldFun = fun({_PSeq, _UUID, Id, _Revs}, _Acc) ->
             case Id of
-                DocId -> {ok, true};
-                _ -> {ok, false}
+                DocId -> true;
+                _ -> false
             end
-                  end,
+        end,
         {ok, IsPurgedBefore} = Engine:fold_purged_docs(St, 0, FoldFun, false, []),
         case IsPurgedBefore of
             true -> {{}, UpdateSeq, purged_before};
@@ -251,10 +252,10 @@ gen_write(Engine, St, {purge, {DocId, PrevRevs0, _}}, UpdateSeq) ->
 
         if NotRemRevs == [] -> ok; true ->
             % Check if these Revs have been purged before
-            FoldFun = fun(_PurgeSeq, {Id, Revs}, Acc) ->
+            FoldFun = fun({_Pseq, _UUID, Id, Revs}, Acc) ->
                 case Id of
-                    DocId -> {ok, Acc ++ Revs};
-                    _ -> {ok, Acc}
+                    DocId -> Acc ++ Revs;
+                    _ -> Acc
                 end
             end,
             {ok, PurgedRevs} = Engine:fold_purged_docs(St, 0, FoldFun, [], []),
@@ -486,11 +487,11 @@ db_changes_as_term(Engine, St) ->
 
 db_purged_docs_as_term(Engine, St) ->
     StartPSeq = Engine:get(St, oldest_purge_seq) - 1,
-    FoldFun = fun(PurgeSeq, {Id, Revs}, Acc) ->
-            {ok, [{PurgeSeq, Id, Revs} | Acc]} end,
-    {ok, PurgedSeqDocs} = Engine:fold_purged_docs(St, StartPSeq,
-            FoldFun, [], []),
-    lists:reverse(PurgedSeqDocs).
+    FoldFun = fun({PSeq, UUID, Id, Revs}, Acc) ->
+        [{PSeq, UUID, Id, Revs} | Acc]
+    end,
+    {ok, PDocs} = Engine:fold_purged_docs(St, StartPSeq, FoldFun, [], []),
+    PDocs.
 
 
 fdi_to_term(Engine, St, FDI) ->
@@ -619,11 +620,26 @@ compact(Engine, St1, DbPath) ->
         {'$gen_cast', {compact_done, Engine, Term0}} ->
             Term0;
         {'DOWN', Ref, _, _, Reason} ->
-            erlang:error({compactor_died, Reason})
+            erlang:error({compactor_died, Reason});
+        {'$gen_call', {Pid, Ref2}, get_disposable_purge_seq} ->
+            PSeq = Engine:get(St2, purge_seq),
+            OldestPSeq = Engine:get(St2, oldest_purge_seq),
+            PDocsLimit = Engine:get(St2, purged_docs_limit),
+            NPurgeExceed = (PSeq-OldestPSeq+1) - PDocsLimit,
+            NewOldestPSeq = if NPurgeExceed>0 -> 1 +  (PSeq-PDocsLimit);
+                    true -> OldestPSeq end,
+            Pid!{Ref2, {ok, NewOldestPSeq}},
+            receive
+                {'$gen_cast', {compact_done, Engine, Term0}} ->
+                    Term0;
+                {'DOWN', Ref, _, _, Reason} ->
+                    erlang:error({compactor_died, Reason})
+                after 10000 ->
+                    erlang:error(compactor_timed_out)
+            end
         after 10000 ->
             erlang:error(compactor_timed_out)
     end,
-
     {ok, St2, DbName, Pid, Term}.
 
 

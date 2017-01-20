@@ -56,7 +56,8 @@ purge_simple(DbName) ->
     ?_test(
         begin
             {ok, Db} = couch_db:open_int(DbName, []),
-            {ok, Rev} = save_doc(Db, {[{<<"_id">>, <<"foo">>}, {<<"vsn">>, 1}]}),
+            DocId = <<"foo">>,
+            {ok, Rev} = save_doc(Db, {[{<<"_id">>, DocId}, {<<"vsn">>, 1}]}),
             couch_db:ensure_full_commit(Db),
 
             {ok, Db2} = couch_db:reopen(Db),
@@ -66,18 +67,19 @@ purge_simple(DbName) ->
             ?assertEqual(0, couch_db_engine:get(Db2, purge_seq)),
             ?assertEqual(nil, couch_db_engine:get(Db2, purge_tree_state)),
 
-            IdsRevs = [{<<"foo">>, [Rev]}],
-            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db2, IdsRevs),
+            UUID = couch_uuids:new(),
+            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db2,
+                [{UUID, DocId, [Rev]}]),
             ?assertEqual([Rev], PRevs),
             ?assertEqual(1, PurgeSeq),
 
             {ok, Db3} = couch_db:reopen(Db2),
-            {ok, PIdsRevs} = couch_db:fold_purged_docs(Db3, 0, fun fold_fun/3, [], []),
+            {ok, PIdsRevs} = couch_db:fold_purged_docs(Db3, 0, fun fold_fun/2, [], []),
             ?assertEqual(0, couch_db_engine:get(Db3, doc_count)),
             ?assertEqual(0, couch_db_engine:get(Db3, del_doc_count)),
             ?assertEqual(2, couch_db_engine:get(Db3, update_seq)),
             ?assertEqual(1, couch_db_engine:get(Db3, purge_seq)),
-            ?assertEqual(IdsRevs, PIdsRevs)
+            ?assertEqual([{DocId, [Rev]}], PIdsRevs)
         end).
 
 
@@ -85,34 +87,36 @@ add_delete_purge(DbName) ->
     ?_test(
         begin
             {ok, Db0} = couch_db:open_int(DbName, []),
-            {ok, Rev} = save_doc(Db0, {[{<<"_id">>, <<"foo">>}, {<<"vsn">>, 1}]}),
+            DocId = <<"foo">>,
+            {ok, Rev} = save_doc(Db0, {[{<<"_id">>, DocId}, {<<"vsn">>, 1}]}),
             couch_db:ensure_full_commit(Db0),
             {ok, Db1} = couch_db:reopen(Db0),
 
-            {ok, Rev2} = save_doc(Db1, {[{<<"_id">>, <<"foo">>}, {<<"vsn">>, 2},
+            {ok, Rev2} = save_doc(Db1, {[{<<"_id">>, DocId}, {<<"vsn">>, 2},
                 {<<"_rev">>, couch_doc:rev_to_str(Rev)}, {<<"_deleted">>, true}]}),
             couch_db:ensure_full_commit(Db1),
 
             {ok, Db2} = couch_db:reopen(Db1),
-            {ok, PIdsRevs1} = couch_db:fold_purged_docs(Db2, 0, fun fold_fun/3, [], []),
+            {ok, PIdsRevs1} = couch_db:fold_purged_docs(Db2, 0, fun fold_fun/2, [], []),
             ?assertEqual(0, couch_db_engine:get(Db2, doc_count)),
             ?assertEqual(1, couch_db_engine:get(Db2, del_doc_count)),
             ?assertEqual(2, couch_db_engine:get(Db2, update_seq)),
             ?assertEqual(0, couch_db_engine:get(Db2, purge_seq)),
             ?assertEqual([], PIdsRevs1),
 
-            IdsRevs = [{<<"foo">>, [Rev2]}],
-            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db2, IdsRevs),
+            UUID = couch_uuids:new(),
+            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db2,
+                [{UUID, DocId, [Rev2]}]),
             ?assertEqual([Rev2], PRevs),
             ?assertEqual(1, PurgeSeq),
 
             {ok, Db3} = couch_db:reopen(Db2),
-            {ok, PIdsRevs2} = couch_db:fold_purged_docs(Db3, 0, fun fold_fun/3, [], []),
+            {ok, PIdsRevs2} = couch_db:fold_purged_docs(Db3, 0, fun fold_fun/2, [], []),
             ?assertEqual(0, couch_db_engine:get(Db3, doc_count)),
             ?assertEqual(0, couch_db_engine:get(Db3, del_doc_count)),
             ?assertEqual(3, couch_db_engine:get(Db3, update_seq)),
             ?assertEqual(1, couch_db_engine:get(Db3, purge_seq)),
-            ?assertEqual(IdsRevs, PIdsRevs2)
+            ?assertEqual([{DocId, [Rev2]}], PIdsRevs2)
         end).
 
 
@@ -130,18 +134,19 @@ add_two_purge_one(DbName) ->
             ?assertEqual(2, couch_db_engine:get(Db2, update_seq)),
             ?assertEqual(0, couch_db_engine:get(Db2, purge_seq)),
 
-            IdsRevs = [{<<"foo">>, [Rev]}],
-            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db2, IdsRevs),
+            UUID = couch_uuids:new(),
+            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db2,
+                [{UUID, <<"foo">>, [Rev]}]),
             ?assertEqual([Rev], PRevs),
             ?assertEqual(1, PurgeSeq),
 
             {ok, Db3} = couch_db:reopen(Db2),
-            {ok, PIdsRevs} = couch_db:fold_purged_docs(Db3, 0, fun fold_fun/3, [], []),
+            {ok, PIdsRevs} = couch_db:fold_purged_docs(Db3, 0, fun fold_fun/2, [], []),
             ?assertEqual(1, couch_db_engine:get(Db3, doc_count)),
             ?assertEqual(0, couch_db_engine:get(Db3, del_doc_count)),
             ?assertEqual(3, couch_db_engine:get(Db3, update_seq)),
             ?assertEqual(1, couch_db_engine:get(Db3, purge_seq)),
-            ?assertEqual(IdsRevs, PIdsRevs)
+            ?assertEqual([{<<"foo">>, [Rev]}], PIdsRevs)
         end).
 
 
@@ -149,14 +154,15 @@ purge_id_not_exist(DbName) ->
     ?_test(
         begin
             {ok, Db} = couch_db:open_int(DbName, []),
-            IdsRevs = [{<<"foo">>, [{0, <<0>>}]}],
-            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db, IdsRevs),
+            UUID = couch_uuids:new(),
+            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db,
+                [{UUID, <<"foo">>, [{0, <<0>>}]}]),
 
             ?assertEqual([], PRevs),
             ?assertEqual(0, PurgeSeq),
 
             {ok, Db2} = couch_db:reopen(Db),
-            {ok, PIdsRevs} = couch_db:fold_purged_docs(Db2, 0, fun fold_fun/3, [], []),
+            {ok, PIdsRevs} = couch_db:fold_purged_docs(Db2, 0, fun fold_fun/2, [], []),
             ?assertEqual(0, couch_db_engine:get(Db2, doc_count)),
             ?assertEqual(0, couch_db_engine:get(Db2, del_doc_count)),
             ?assertEqual(0, couch_db_engine:get(Db2, update_seq)),
@@ -178,13 +184,14 @@ purge_non_leaf_rev(DbName) ->
             couch_db:ensure_full_commit(Db2),
             {ok, Db3} = couch_db:reopen(Db2),
 
-            IdsRevs = [{<<"foo">>, [Rev]}],
-            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db3, IdsRevs),
+            UUID = couch_uuids:new(),
+            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db3,
+                [{UUID, <<"foo">>, [Rev]}]),
             ?assertEqual([], PRevs),
             ?assertEqual(0, PurgeSeq),
 
             {ok, Db4} = couch_db:reopen(Db3),
-            {ok, PIdsRevs} = couch_db:fold_purged_docs(Db4, 0, fun fold_fun/3, [], []),
+            {ok, PIdsRevs} = couch_db:fold_purged_docs(Db4, 0, fun fold_fun/2, [], []),
             ?assertEqual(1, couch_db_engine:get(Db4, doc_count)),
             ?assertEqual(2, couch_db_engine:get(Db4, update_seq)),
             ?assertEqual(0, couch_db_engine:get(Db4, purge_seq)),
@@ -210,19 +217,20 @@ purge_conflicts(DbName) ->
             couch_db:ensure_full_commit(Db2),
             {ok, Db3} = couch_db:reopen(Db2),
 
-            IdsRevs = [{<<"foo">>, [Rev]}],
-            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db3, IdsRevs),
+            UUID = couch_uuids:new(),
+            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db3,
+                [{UUID, <<"foo">>, [Rev]}]),
             ?assertEqual([Rev], PRevs),
             ?assertEqual(1, PurgeSeq),
 
             {ok, Db4} = couch_db:reopen(Db3),
-            {ok, PIdsRevs} = couch_db:fold_purged_docs(Db4, 0, fun fold_fun/3, [], []),
+            {ok, PIdsRevs} = couch_db:fold_purged_docs(Db4, 0, fun fold_fun/2, [], []),
             % still has one doc
             ?assertEqual(1, couch_db_engine:get(Db4, doc_count)),
             ?assertEqual(0, couch_db_engine:get(Db4, del_doc_count)),
             ?assertEqual(3, couch_db_engine:get(Db4, update_seq)),
             ?assertEqual(1, couch_db_engine:get(Db4, purge_seq)),
-            ?assertEqual(IdsRevs, PIdsRevs)
+            ?assertEqual([{<<"foo">>, [Rev]}], PIdsRevs)
         end).
 
 
@@ -236,8 +244,7 @@ save_doc(Db, Json) ->
     Doc = couch_doc:from_json_obj(Json),
     couch_db:update_doc(Db, Doc, []).
 
-fold_fun(_PurgeSeq, {Id, Revs}, Acc) ->
-    {ok, [{Id, Revs} | Acc]}.
-
+fold_fun({_PSeq, _UUID, Id, Revs}, Acc) ->
+    [{Id, Revs} | Acc].
 
 

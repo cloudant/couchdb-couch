@@ -70,10 +70,9 @@
         {ok, NewUserAcc::any()} |
         {stop, NewUserAcc::any()}).
 
--type purge_fold_fun() :: fun((PurgeSeq::non_neg_integer(),
-        {Id::docid(), Revs::revs()}, UserAcc::any()) ->
-    {ok, NewUserAcc::any()} |
-    {stop, NewUserAcc::any()}).
+-type purge_fold_fun() :: fun((
+    {PurgeSeq::non_neg_integer(), UUID:: binary(), Id::docid(), Revs::revs()},
+    UserAcc::any()) -> NewUserAcc::any()).
 
 
 % This is called by couch_server to determine which
@@ -282,7 +281,8 @@
 % and as such is guaranteed single threaded for the given
 % DbHandle.
 %
-% The Pair argument is a tuple of full_doc_info{} records.
+% The Pairs argument is a list of pairs (2-tuples) of
+% #full_doc_info{} records.
 % The first element of the pair is the #full_doc_info{} that exists
 % on disk. The second element is the new version that should be written
 % to disk. There are two basic cases that should be considered:
@@ -297,12 +297,12 @@
 % means it needs to be removed from the database including the
 % update sequence.
 %
-% The PurgedDocIdRevs is the tuple of Id and Revisions that were
-% purged during this update.
+% The Purges argument is a list of 3-tuples, representing a purge request.
+% Each tuple consists of the purge UUId, DocId and Revisions, that were purged.
 -callback purge_doc_revs(
     DbHandle::db_handle(),
-    Pair::doc_pair(),
-    PurgedDocIdRevs::{docid(), revs()}) ->
+    Pairs::doc_pairs(),
+    Purges::[{binary(), docid(), revs()}]) ->
         {ok, NewDbHandle::db_handle()}.
 
 
@@ -361,9 +361,9 @@
 %
 %     1. start_key - Start iteration at the provided key or
 %        or just after if the key doesn't exist
-%     2. end_key - Stop iteration prior to visiting the provided
+%     2. end_key_gt - Stop iteration prior to visiting the provided
 %        key
-%     3. end_key_gt - Stop iteration just after the provided key
+%     3. end_key - Stop iteration just after the provided key
 %     4. dir - The atom fwd or rev. This is to be able to iterate
 %        over documents in reverse order. The logic for comparing
 %        start_key, end_key, and end_key_gt are then reversed (ie,
@@ -443,14 +443,10 @@
 
 % This function may be called by many processes concurrently.
 %
-% This function is called to fold over purged documents in order of
-% their most recent purge.
+% This function is called to fold over purged requests in order of
+% their oldest purge (increasing purge_seq order)
 %
-% This should behave similarly to fold_changes/5 except with no
-% option for iterating in reverse.
-%
-% The StartPurgeSeq parameter indicates where the fold should start
-% *after*.
+% The StartPurgeSeq parameter indicates where the fold should start *after*.
 -callback fold_purged_docs(
     DbHandle::db_handle(),
     StartPurgeSeq::non_neg_integer(),
@@ -539,6 +535,7 @@
 
     open_docs/2,
     open_local_docs/2,
+    open_purged_docs/2,
     read_doc_body/2,
 
     serialize_doc/2,
@@ -665,6 +662,11 @@ open_local_docs(#db{} = Db, DocIds) ->
     Engine:open_local_docs(EngineState, DocIds).
 
 
+open_purged_docs(#db{} = Db, UUIDs) ->
+    #db{engine = {Engine, EngineState}} = Db,
+    Engine:open_purged_docs(EngineState, UUIDs).
+
+
 read_doc_body(#db{} = Db, RawDoc) ->
     #db{engine = {Engine, EngineState}} = Db,
     Engine:read_doc_body(EngineState, RawDoc).
@@ -687,10 +689,10 @@ write_doc_infos(#db{} = Db, DocUpdates, LocalDocs) ->
     {ok, Db#db{engine = {Engine, NewSt}}}.
 
 
-purge_doc_revs(#db{} = Db, DocUpdates, PurgedDocIdRevs) ->
+purge_doc_revs(#db{} = Db, DocUpdates, Purges) ->
     #db{engine = {Engine, EngineState}} = Db,
     {ok, NewSt} = Engine:purge_doc_revs(
-        EngineState, DocUpdates, PurgedDocIdRevs),
+        EngineState, DocUpdates, Purges),
     {ok, Db#db{engine = {Engine, NewSt}}}.
 
 

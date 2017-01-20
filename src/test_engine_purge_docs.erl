@@ -25,7 +25,7 @@ cet_purge_simple() ->
         {create, {<<"foo">>, [{<<"vsn">>, 1}]}}
     ],
     {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions1),
-    {ok, PIdRevs2} = Engine:fold_purged_docs(St2, 0, fun fold_fun/3, [], []),
+    {ok, PIdRevs2} = Engine:fold_purged_docs(St2, 0, fun fold_fun/2, [], []),
 
     ?assertEqual(1, Engine:get(St2, doc_count)),
     ?assertEqual(0, Engine:get(St2, del_doc_count)),
@@ -41,7 +41,7 @@ cet_purge_simple() ->
         {purge, {<<"foo">>, Rev}}
     ],
     {ok, St3} = test_engine_util:apply_actions(Engine, St2, Actions2),
-    {ok, PIdRevs3} = Engine:fold_purged_docs(St3, 0, fun fold_fun/3, [], []),
+    {ok, PIdRevs3} = Engine:fold_purged_docs(St3, 0, fun fold_fun/2, [], []),
 
     ?assertEqual(0, Engine:get(St3, doc_count)),
     ?assertEqual(0, Engine:get(St3, del_doc_count)),
@@ -58,7 +58,7 @@ cet_purge_conflicts() ->
         {conflict, {<<"foo">>, [{<<"vsn">>, 2}]}}
     ],
     {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions1),
-    {ok, PIdRevs2} = Engine:fold_purged_docs(St2, 0, fun fold_fun/3, [], []),
+    {ok, PIdRevs2} = Engine:fold_purged_docs(St2, 0, fun fold_fun/2, [], []),
 
     ?assertEqual(1, Engine:get(St2, doc_count)),
     ?assertEqual(0, Engine:get(St2, del_doc_count)),
@@ -74,7 +74,7 @@ cet_purge_conflicts() ->
         {purge, {<<"foo">>, Rev1}}
     ],
     {ok, St3} = test_engine_util:apply_actions(Engine, St2, Actions2),
-    {ok, PIdRevs3} = Engine:fold_purged_docs(St3, 0, fun fold_fun/3, [], []),
+    {ok, PIdRevs3} = Engine:fold_purged_docs(St3, 0, fun fold_fun/2, [], []),
 
     ?assertEqual(1, Engine:get(St3, doc_count)),
     ?assertEqual(0, Engine:get(St3, del_doc_count)),
@@ -90,7 +90,7 @@ cet_purge_conflicts() ->
         {purge, {<<"foo">>, Rev2}}
     ],
     {ok, St4} = test_engine_util:apply_actions(Engine, St3, Actions3),
-    {ok, PIdRevs4} = Engine:fold_purged_docs(St4, 0, fun fold_fun/3, [], []),
+    {ok, PIdRevs4} = Engine:fold_purged_docs(St4, 0, fun fold_fun/2, [], []),
 
     ?assertEqual(0, Engine:get(St4, doc_count)),
     ?assertEqual(0, Engine:get(St4, del_doc_count)),
@@ -109,7 +109,7 @@ cet_add_delete_purge() ->
     ],
 
     {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions1),
-    {ok, PIdRevs2} = Engine:fold_purged_docs(St2, 0, fun fold_fun/3, [], []),
+    {ok, PIdRevs2} = Engine:fold_purged_docs(St2, 0, fun fold_fun/2, [], []),
 
 
     ?assertEqual(0, Engine:get(St2, doc_count)),
@@ -126,7 +126,7 @@ cet_add_delete_purge() ->
         {purge, {<<"foo">>, Rev}}
     ],
     {ok, St3} = test_engine_util:apply_actions(Engine, St2, Actions2),
-    {ok, PIdRevs3} = Engine:fold_purged_docs(St3, 0, fun fold_fun/3, [], []),
+    {ok, PIdRevs3} = Engine:fold_purged_docs(St3, 0, fun fold_fun/2, [], []),
 
 
     ?assertEqual(0, Engine:get(St3, doc_count)),
@@ -145,7 +145,7 @@ cet_add_two_purge_one() ->
     ],
 
     {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions1),
-    {ok, PIdRevs2} = Engine:fold_purged_docs(St2, 0, fun fold_fun/3, [], []),
+    {ok, PIdRevs2} = Engine:fold_purged_docs(St2, 0, fun fold_fun/2, [], []),
 
     ?assertEqual(2, Engine:get(St2, doc_count)),
     ?assertEqual(0, Engine:get(St2, del_doc_count)),
@@ -161,7 +161,7 @@ cet_add_two_purge_one() ->
         {purge, {<<"foo">>, Rev}}
     ],
     {ok, St3} = test_engine_util:apply_actions(Engine, St2, Actions2),
-    {ok, PIdRevs3} = Engine:fold_purged_docs(St3, 0, fun fold_fun/3, [], []),
+    {ok, PIdRevs3} = Engine:fold_purged_docs(St3, 0, fun fold_fun/2, [], []),
 
     ?assertEqual(1, Engine:get(St3, doc_count)),
     ?assertEqual(0, Engine:get(St3, del_doc_count)),
@@ -170,6 +170,5 @@ cet_add_two_purge_one() ->
     ?assertEqual([{<<"foo">>, [Rev]}], PIdRevs3).
 
 
-
-fold_fun(_PurgeSeq, {Id, Revs}, Acc) ->
-    {ok, [{Id, Revs} | Acc]}.
+fold_fun({_Pseq, _UUID, Id, Revs}, Acc) ->
+    [{Id, Revs} | Acc].

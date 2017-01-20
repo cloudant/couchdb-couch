@@ -58,8 +58,9 @@ start(#st{} = St, DbName, Options, Parent) ->
     NewSt3 = sort_meta_data(NewSt2),
     NewSt4 = commit_compaction_data(NewSt3),
     NewSt5 = copy_meta_data(NewSt4),
-    {ok, NewSt6} = couch_bt_engine:commit_data(NewSt5),
-    ok = couch_bt_engine:decref(NewSt6),
+    NewSt6 = copy_purge_info(St, NewSt5, Parent),
+    {ok, NewSt7} = couch_bt_engine:commit_data(NewSt6),
+    ok = couch_bt_engine:decref(NewSt7),
     ok = couch_file:close(MFd),
 
     % Done
@@ -89,7 +90,9 @@ open_compaction_files(SrcHdr, DbFilePath, Options) ->
             St1 = bind_emsort(St0, MetaFd, nil),
             {ok, St1, DataFile, DataFd, MetaFd, St0#st.id_tree};
         _ ->
-            Header = couch_bt_engine_header:from(SrcHdr),
+            Header0 = couch_bt_engine_header:from(SrcHdr),
+            % set purge_seq to -1 on the 1st round of compaction
+            Header = couch_bt_engine_header:set(Header0, [{purge_seq, -1}]),
             ok = reset_compaction_file(DataFd, Header),
             ok = reset_compaction_file(MetaFd, Header),
             St0 = couch_bt_engine:init_state(DataFile, DataFd, Header, Options),
@@ -296,6 +299,60 @@ copy_doc_attachments(#st{} = SrcSt, SrcSp, DstSt) ->
             {Name, Type, NewBinSp, AttLen, DiskLen, RevPos, ExpectedMd5, Enc}
         end, BinInfos),
     {BodyData, NewBinInfos}.
+
+
+copy_purge_info(OldSt, NewSt, Parent) ->
+    OldPurgeSeq = couch_bt_engine:get(OldSt, purge_seq),
+    NewPurgeSeq = couch_bt_engine:get(NewSt, purge_seq),
+    % NewPurgeSeq equal to -1 indicates the 1st round of compaction
+    % copy purges if there smth to copy and only for 1st round of compaction
+    if (OldPurgeSeq > 0) and (NewPurgeSeq == -1) ->
+        copy_purge_info_int(OldSt, NewSt, Parent);
+    true ->
+        if (NewPurgeSeq == -1) ->
+            NewHeader = couch_bt_engine_header:set(NewSt#st.header,
+                [{purge_seq, 0}]),
+            NewSt#st{header=NewHeader};
+        true ->
+            NewSt
+        end
+    end.
+
+
+copy_purge_info_int(OldSt, NewSt, Parent) ->
+    % Check if oldest purges could be removed from OldSt's purge trees
+    OldestPSeq = couch_bt_engine:get(OldSt, oldest_purge_seq),
+    {ok, NewOldestPSeq} = gen_server:call(Parent, get_disposable_purge_seq),
+    {StartPSeq, OldSt2} = if NewOldestPSeq =< OldestPSeq ->
+        % can't remove oldest purges, as there are clients that
+        % haven't processed them yet
+        {OldestPSeq-1, OldSt};
+    true ->
+        % delete oldest purge requests
+        Options = [{end_key_gt, NewOldestPSeq}],
+        {ok, {RemP, RemU}} = couch_bt_engine:fold_purged_docs(OldSt, OldestPSeq-1,
+            fun({P, U, _Id, _Revs}, {AccP, AccU}) ->
+                {[P|AccP], [U|AccU]}
+            end,
+        {[], []}, Options),
+        {ok, OldPTree} = couch_btree:add_remove(OldSt#st.purge_tree, [], RemP),
+        {ok, OldUTree} = couch_btree:add_remove(OldSt#st.upurge_tree, [], RemU),
+        {NewOldestPSeq-1, OldSt#st{purge_tree = OldPTree, upurge_tree = OldUTree}}
+    end,
+
+    % copy purge requests from OldSt2 to NewSt starting from StartPSeq
+    {ok, {AddP, AddU}} = couch_bt_engine:fold_purged_docs(OldSt2, StartPSeq,
+        fun({P, U, Id, Revs}, {AccP, AccU}) ->
+            {[{P,U}|AccP], [{U,{Id, Revs}}|AccU]}
+        end,
+    {[], []}, []),
+    {ok, NewPTree} = couch_btree:add(NewSt#st.purge_tree, lists:reverse(AddP)),
+    {ok, NewUTree} = couch_btree:add(NewSt#st.upurge_tree, lists:reverse(AddU)),
+
+    NewHeader = couch_bt_engine_header:set(NewSt#st.header,
+        [{purge_seq, couch_bt_engine:get(OldSt, purge_seq)}]
+    ),
+    NewSt#st{purge_tree = NewPTree, upurge_tree = NewUTree, header = NewHeader}.
 
 
 sort_meta_data(St0) ->

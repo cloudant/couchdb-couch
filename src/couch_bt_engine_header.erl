@@ -32,8 +32,8 @@
     latest/1,
     local_tree_state/1,
     purge_tree_state/1,
+    upurge_tree_state/1,
     purge_seq/1,
-    compact_purge_seq/1,
     purged_docs_limit/1,
     security_ptr/1,
     revs_limit/1,
@@ -63,14 +63,14 @@
     seq_tree_state = nil,
     local_tree_state = nil,
     purge_seq = 0,
-    purge_tree_state = nil,
+    purge_tree_state = nil, %purge tree: purge_seq -> uuid
     security_ptr = nil,
     revs_limit = 1000,
     uuid,
     epochs,
     compacted_seq,
-    purged_docs_limit = 1000,
-    compact_purge_seq = 0 % purge seq when compact starts
+    upurge_tree_state = nil, %purge tree: uuid -> {docid, revs}
+    purged_docs_limit = 1000
 }).
 
 
@@ -158,12 +158,12 @@ purge_tree_state(Header) ->
     get_field(Header, purge_tree_state).
 
 
+upurge_tree_state(Header) ->
+    get_field(Header, upurge_tree_state).
+
+
 purge_seq(Header) ->
     get_field(Header, purge_seq).
-
-
-compact_purge_seq(Header) ->
-    get_field(Header, compact_purge_seq).
 
 
 purged_docs_limit(Header) ->

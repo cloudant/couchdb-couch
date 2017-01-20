@@ -23,7 +23,7 @@
 
 cet_empty_purged_docs() ->
     {ok, Engine, St} = test_engine_util:init_engine(),
-    ?assertEqual({ok, []}, Engine:fold_purged_docs(St, 0, fun fold_fun/3, [], [])).
+    ?assertEqual({ok, []}, Engine:fold_purged_docs(St, 0, fun fold_fun/2, [], [])).
 
 
 cet_all_purged_docs() ->
@@ -39,17 +39,18 @@ cet_all_purged_docs() ->
     {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions),
 
     FDIs = Engine:open_docs(St2, Ids),
-    {RActions2, RIdRevs} = lists:foldl(fun(FDI, {CActions, CIdRevs}) ->
+    {RevActions2, RevIdRevs} = lists:foldl(fun(FDI, {CActions, CIdRevs}) ->
         Id = FDI#full_doc_info.id,
         PrevRev = test_engine_util:prev_rev(FDI),
         Rev = PrevRev#rev_info.rev,
         Action = {purge, {Id, Rev}},
         {[Action| CActions], [{Id, [Rev]}| CIdRevs]}
      end, {[], []}, FDIs),
-    {ok, St3} = test_engine_util:apply_actions(Engine, St2, lists:reverse(RActions2)),
+    {Actions2, IdsRevs} = {lists:reverse(RevActions2), lists:reverse(RevIdRevs)},
 
-    {ok, PurgedIdRevs} = Engine:fold_purged_docs(St3, 0, fun fold_fun/3, [], []),
-    ?assertEqual(RIdRevs, PurgedIdRevs).
+    {ok, St3} = test_engine_util:apply_actions(Engine, St2, Actions2),
+    {ok, PurgedIdRevs} = Engine:fold_purged_docs(St3, 0, fun fold_fun/2, [], []),
+    ?assertEqual(IdsRevs, lists:reverse(PurgedIdRevs)).
 
 
 cet_start_seq() ->
@@ -76,7 +77,7 @@ cet_start_seq() ->
 
     StartSeq = 3,
     StartSeqIdRevs = lists:nthtail(StartSeq, lists:reverse(RIdRevs)),
-    {ok, PurgedIdRevs} = Engine:fold_purged_docs(St3, StartSeq, fun fold_fun/3, [], []),
+    {ok, PurgedIdRevs} = Engine:fold_purged_docs(St3, StartSeq, fun fold_fun/2, [], []),
     ?assertEqual(StartSeqIdRevs, lists:reverse(PurgedIdRevs)).
 
 
@@ -97,13 +98,13 @@ cet_id_rev_repeated() ->
     ],
     {ok, St3} = test_engine_util:apply_actions(Engine, St2, Actions2),
     PurgedIdRevs0 = [{<<"foo">>, [Rev1]}],
-    {ok, PurgedIdRevs1} = Engine:fold_purged_docs(St3, 0, fun fold_fun/3, [], []),
+    {ok, PurgedIdRevs1} = Engine:fold_purged_docs(St3, 0, fun fold_fun/2, [], []),
     ?assertEqual(PurgedIdRevs0, PurgedIdRevs1),
     ?assertEqual(1, Engine:get(St3, purge_seq)),
 
     % purge the same Id,Rev when the doc still exists
     {ok, St4} = test_engine_util:apply_actions(Engine, St3, Actions2),
-    {ok, PurgedIdRevs2} = Engine:fold_purged_docs(St4, 0, fun fold_fun/3, [], []),
+    {ok, PurgedIdRevs2} = Engine:fold_purged_docs(St4, 0, fun fold_fun/2, [], []),
     ?assertEqual(PurgedIdRevs0, PurgedIdRevs2),
     ?assertEqual(1, Engine:get(St4, purge_seq)),
 
@@ -118,60 +119,13 @@ cet_id_rev_repeated() ->
 
     % purge the same Id,Rev when the doc was completely purged
     {ok, St6} = test_engine_util:apply_actions(Engine, St5, Actions3),
-    {ok, PurgedIdRevs3} = Engine:fold_purged_docs(St6, 0, fun fold_fun/3, [], []),
+    {ok, PurgedIdRevs3} = Engine:fold_purged_docs(St6, 0, fun fold_fun/2, [], []),
     ?assertEqual(PurgedIdRevs00, lists:reverse(PurgedIdRevs3)),
     ?assertEqual(2, Engine:get(St6, purge_seq)).
 
 
-cet_purged_docs_limit() ->
-    {ok, Engine, St1} = test_engine_util:init_engine(),
-    {ok, St2} = Engine:set(St1, purged_docs_limit, 2),
-
-    Id1 = docid(1),
-    Id2 = docid(2),
-    Id3 = docid(3),
-    Id4 = docid(4),
-
-    Actions1 = [
-        {create, {Id1, [{<<"int">>, 1}]}},
-        {create, {Id2, [{<<"int">>, 2}]}},
-        {create, {Id3, [{<<"int">>, 3}]}},
-        {create, {Id4, [{<<"int">>, 4}]}}
-    ],
-    {ok, St3} = test_engine_util:apply_actions(Engine, St2, Actions1),
-
-    FDIs = Engine:open_docs(St3, [Id1, Id2, Id3, Id4]),
-    PrevRev1 = test_engine_util:prev_rev(lists:nth(1, FDIs)),
-    PrevRev2 = test_engine_util:prev_rev(lists:nth(2, FDIs)),
-    PrevRev3 = test_engine_util:prev_rev(lists:nth(3, FDIs)),
-    PrevRev4 = test_engine_util:prev_rev(lists:nth(4, FDIs)),
-
-    Rev1 = PrevRev1#rev_info.rev,
-    Rev2 = PrevRev2#rev_info.rev,
-    Rev3 = PrevRev3#rev_info.rev,
-    Rev4 = PrevRev4#rev_info.rev,
-
-    Actions2 = [
-        {purge, {Id1, Rev1}},
-        {purge, {Id2, Rev2}},
-        {purge, {Id3, Rev3}},
-        {purge, {Id4, Rev4}}
-    ],
-
-    {ok, St4} = test_engine_util:apply_actions(Engine, St3, Actions2),
-
-    RecentTwoIdRevs = [{Id3, [Rev3]}, {Id4, [Rev4]}],
-    StartSeq1 = 2,
-    {ok, PurgedIdRevs} = Engine:fold_purged_docs(St4, StartSeq1, fun fold_fun/3, [], []),
-    ?assertEqual(RecentTwoIdRevs, lists:reverse(PurgedIdRevs)),
-
-    StartSeq2 = 1,
-    ?assertThrow({invalid_start_purge_seq, StartSeq2},
-            Engine:fold_purged_docs(St4, StartSeq2, fun fold_fun/3, [], [])).
-
-
-fold_fun(_PurgeSeq, {Id, Revs}, Acc) ->
-    {ok, [{Id, Revs} | Acc]}.
+fold_fun({_PSeq, _UUID, Id, Revs}, Acc) ->
+    [{Id, Revs} | Acc].
 
 
 docid(I) ->

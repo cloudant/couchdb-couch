@@ -91,47 +91,43 @@ handle_call({set_purged_docs_limit, Limit}, _From, Db) ->
     ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
     {reply, ok, Db2};
 
-handle_call({purge_docs, {Id, Revs}}, _From,
-        #db{compactor_pid=Pid}=Db) when Pid /= nil ->
-    % don't allow to purge more than purged_docs_limit
-    % docs during compaction
-    StartPSeq = couch_db_engine:get(Db, compact_purge_seq),
-    CurPSeq = couch_db_engine:get(Db, purge_seq),
-    PDocsLimit = couch_db_engine:get(Db, purged_docs_limit),
-    if (StartPSeq + PDocsLimit) =< CurPSeq ->
-        {reply, {error, purge_during_compaction_exceeded_limit}, Db};
-    true ->
-        [OldDocInfo] = couch_db_engine:open_docs(Db, [Id]),
-        InitUpdateSeq = couch_db_engine:get(Db, update_seq),
-        case purge_docs(OldDocInfo, InitUpdateSeq, Id, Revs) of
-            not_found ->
-                PurgeSeq = couch_db_engine:get(Db, purge_seq),
-                {reply, {ok, {PurgeSeq, []}}, Db};
-            {Pair, {Id, PRevs}} ->
-                {ok, Db2} = couch_db_engine:purge_doc_revs(
-                        Db, Pair, {Id, PRevs}),
-                ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
-                couch_event:notify(Db#db.name, updated),
-                PurgeSeq = couch_db_engine:get(Db2, purge_seq),
-                {reply, {ok, {PurgeSeq, PRevs}}, Db2}
-        end
-    end;
+handle_call({purge_docs, UUIDsIdsRevs}, _From, Db) ->
+    UpdateSeq = couch_db_engine:get(Db, update_seq),
+    Ids = [Id||{_UUID, Id, _Revs} <- UUIDsIdsRevs],
+    OldDocInfos = couch_db_engine:open_docs(Db, Ids),
+    DocInfosPurges = lists:zip(OldDocInfos, UUIDsIdsRevs),
 
-handle_call({purge_docs, {Id, Revs}}, _From, Db) ->
-    [OldDocInfo] = couch_db_engine:open_docs(Db, [Id]),
-    InitUpdateSeq = couch_db_engine:get(Db, update_seq),
-    case purge_docs(OldDocInfo, InitUpdateSeq, Id, Revs) of
-        not_found ->
-            PurgeSeq = couch_db_engine:get(Db, purge_seq),
-            {reply, {ok, {PurgeSeq, []}}, Db};
-        {Pair, {Id, PRevs}} ->
-            {ok, Db2} = couch_db_engine:purge_doc_revs(
-                    Db, Pair, {Id, PRevs}),
-            ok = gen_server:call(couch_server, {db_updated, Db2}, infinity),
-            couch_event:notify(Db#db.name, updated),
-            PurgeSeq = couch_db_engine:get(Db2, purge_seq),
-            {reply, {ok, {PurgeSeq, PRevs}}, Db2}
-    end;
+    {_USeq, Replies, Pairs, Purges} = lists:foldl(
+            fun({OldDocInfo, {UUId, Id, Revs}},
+            {UpdSeq, RAcc, PaAcc, PuAcc}) ->
+        case purge_doc(UpdSeq, OldDocInfo, Id, Revs) of
+            not_found ->
+                {UpdSeq,
+                [{ok, []}| RAcc],
+                PaAcc,
+                PuAcc};
+            {NewUpdSeq, Pair, {Id, PurgedRevs}} ->
+                {NewUpdSeq,
+                [{ok, PurgedRevs}| RAcc],
+                [Pair| PaAcc],
+                [{UUId, Id, PurgedRevs}| PuAcc]}
+        end
+    end, {UpdateSeq, [], [], []}, DocInfosPurges),
+
+    Db2 = if Pairs == [] -> Db; true ->
+        {ok, Db1} = couch_db_engine:purge_doc_revs(
+            Db, lists:reverse(Pairs), lists:reverse(Purges)
+        ),
+        ok = gen_server:call(couch_server, {db_updated, Db1}, infinity),
+        couch_event:notify(Db#db.name, updated),
+        Db1
+    end,
+    PurgeSeq = couch_db_engine:get(Db2, purge_seq),
+    {reply, {ok, {PurgeSeq, lists:reverse(Replies)}}, Db2};
+
+handle_call(get_disposable_purge_seq, _From, Db) ->
+    NewOldestPurgeSeq = get_disposable_purge_seq(Db),
+    {reply, {ok, NewOldestPurgeSeq}, Db};
 
 handle_call(Msg, From, Db) ->
     couch_db_engine:handle_call(Msg, From, Db).
@@ -629,7 +625,7 @@ update_local_doc_revs(Docs) ->
     end, Docs).
 
 
-purge_docs(OldDocInfo, UpdateSeq, Id, Revs) ->
+purge_doc(UpdateSeq, OldDocInfo, Id, Revs) ->
     case OldDocInfo of
         #full_doc_info{rev_tree = Tree} = FDI ->
             case couch_key_tree:remove_leafs(Tree, Revs) of
@@ -641,14 +637,14 @@ purge_docs(OldDocInfo, UpdateSeq, Id, Revs) ->
                             % If we purged every #leaf{} in the doc record
                             % then we're removing it completely from the
                             % database.
-                            {{FDI, not_found}, {Id, RemovedRevs}};
+                            {UpdateSeq, {FDI, not_found}, {Id, RemovedRevs}};
                         _ ->
                             % Its possible to purge the #leaf{} that contains
                             % the update_seq where this doc sits in the
                             % update_seq sequence. Rather than do a bunch of
                             % complicated checks we just re-label every #leaf{}
                             % and reinsert it into the update_seq sequence.
-                            {NewTree2, Seq} = couch_key_tree:mapfold(fun
+                            {NewTree2, NewUpdateSeq} = couch_key_tree:mapfold(fun
                                 (_RevId, Leaf, leaf, InnerSeqAcc) ->
                                     {Leaf#leaf{seq = InnerSeqAcc + 1},
                                         InnerSeqAcc + 1};
@@ -657,16 +653,87 @@ purge_docs(OldDocInfo, UpdateSeq, Id, Revs) ->
                             end, UpdateSeq, NewTree),
 
                             NewFDI = FDI#full_doc_info{
-                                update_seq = Seq,
+                                update_seq = NewUpdateSeq,
                                 rev_tree = NewTree2
                             },
-                            {{FDI, NewFDI}, {Id, RemovedRevs}}
+                            {NewUpdateSeq, {FDI, NewFDI}, {Id, RemovedRevs}}
                     end
             end;
         not_found ->
             not_found
     end.
 
+
+% find the oldest purge seq such that
+% all purge requests that happen before it
+% can be removed from purge trees
+get_disposable_purge_seq(#db{name=DbName} = Db) ->
+    PSeq = couch_db_engine:get(Db, purge_seq),
+    OldestPSeq = couch_db_engine:get(Db, oldest_purge_seq),
+    PDocsLimit = couch_db_engine:get(Db, purged_docs_limit),
+    % client's purge_seq can be up to "allowed_purge_seq_lag"
+    % behind the oldest Db's purge seq
+    AllowedPSeqLag = list_to_integer(config:get("couchdb",
+        "allowed_purge_seq_lag", "100")),
+    % will warn about client that exceed "allowed_purge_time_lag"
+    % and also have not checkpointed more than "allowed_purge_time_lag"
+    AllowedPTimeLag = list_to_integer(config:get("couchdb",
+        "allowed_purge_time_lag", "86400")), % secs in 1 day
+
+    % Check if length of purge tree is over purged_docs_limit
+    %   by number > AllowedPSeqLag
+    NPurgeExceed = (PSeq-OldestPSeq+1) - PDocsLimit,
+    NewOldestPSeq = if NPurgeExceed =< AllowedPSeqLag ->
+        % no need to compact purge trees
+        OldestPSeq;
+    true ->
+        Opts = [{start_key, list_to_binary(?LOCAL_DOC_PREFIX ++ "purge-")},
+            {end_key_gt, list_to_binary(?LOCAL_DOC_PREFIX ++ "purge1")}],
+        FoldFun = fun(Doc, Acc) -> {ok, [Doc | Acc]} end,
+        {ok, LocalPDocs} = couch_db_engine:fold_local_docs(Db, FoldFun, [], Opts),
+
+        ClientAllowedMinPSeq = PSeq - PDocsLimit - AllowedPSeqLag,
+        % Find the smallest purge_seq that has been checkpointed by clients
+        MinClientPSeq = lists:foldl(fun(#doc{id=DocID, body={Props}}, MinPSeq0)->
+            ClientPSeq = couch_util:get_value(<<"purge_seq">>, Props),
+            % Warn about clients which checkpointed purge_seq is very behind
+            MinPSeq2 = if ClientPSeq < ClientAllowedMinPSeq ->
+                % verify if client exists
+                M = couch_util:get_value(<<"verify_module">>, Props),
+                F = couch_util:get_value(<<"verify_function">>, Props),
+                A = couch_util:get_value(<<"verify_options">>, Props),
+                IsClientExists = erlang:apply(M, F, A),
+                case IsClientExists of
+                    true ->
+                        % check client's timestamp - the last time client checkpointed
+                        ClientTime = couch_util:get_value(<<"timestamp_utc">>, Props),
+                        {ok, [Y, Mon, D, H, Min, S], [] }=
+                            io_lib:fread("~4d-~2d-~2dT~2d:~2d:~2dZ", ClientTime),
+                        SecsClient = calendar:datetime_to_gregorian_seconds(
+                            {{Y,Mon,D}, {H, Min, S}}),
+                        SecsNow = calendar:datetime_to_gregorian_seconds(
+                                calendar:now_to_universal_time(os:timestamp())),
+                        % warn if we haven't heard of this client more than a day
+                        if SecsClient + AllowedPTimeLag > SecsNow -> ok; true ->
+                            couch_log:warning("Processing of purge requests is much behind on: ~p."
+                            "Prevents purge_tree of db:~p from compacting.", [A, DbName])
+                        end,
+                        if MinPSeq0 > ClientPSeq -> ClientPSeq; true -> MinPSeq0 end;
+                    false ->
+                        couch_log:warning("Client ~p doesn't exists, but its : ~p doc on ~p"
+                        "still exists. Accessed during compaction of purge_tree",
+                        [A, DocID, DbName]),
+                        % client doesn't exist-> we disregard its purge_seq
+                        MinPSeq0
+                end;
+            true ->
+                if MinPSeq0 > ClientPSeq -> ClientPSeq; true -> MinPSeq0 end
+            end,
+            MinPSeq2
+        end, PSeq, LocalPDocs),
+        1 + erlang:min(MinClientPSeq, (PSeq-PDocsLimit))
+    end,
+    NewOldestPSeq.
 
 
 commit_data(Db) ->

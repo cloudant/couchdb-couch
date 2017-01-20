@@ -21,5 +21,6 @@
     seq_tree,
     local_tree,
     compression,
-    purge_tree
+    purge_tree,
+    upurge_tree
 }).
