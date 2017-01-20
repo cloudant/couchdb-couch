@@ -14,7 +14,7 @@
 
 
 -export([
-    start_link/0
+    start_link/2
 ]).
 
 -export([
@@ -48,9 +48,9 @@ start_link(Name, Target) ->
 
 
 init(Parent, Name, Target) ->
-    case register(Name, self()) of
+    try register(Name, self()) of
         true ->
-            proc_link:init_ack(Parent, {ok, self()}),
+            proc_lib:init_ack(Parent, {ok, self()}),
             Debug = sys:debug_options([]),
             {_, Second, _} = os:timestamp(),
             St = #st{
@@ -62,7 +62,7 @@ init(Parent, Name, Target) ->
             },
             loop(Parent, Debug, St)
     catch error:_ ->
-        proc_lib:init_ack(Parent, {error, {already_started, where(Name)}})
+        proc_lib:init_ack(Parent, {error, {already_started, whereis(Name)}})
     end.
 
 
@@ -82,7 +82,7 @@ loop(Parent, Debug, St) ->
             sys:handle_system_msg(Request, From, Parent, Name, Debug, St);
 
         Msg ->
-            InLoc = {in, handle, From},
+            InLoc = {in, handle, Msg},
             Debug2 = sys:handle_debug(Debug, ?WRITE_DEBUG, Name, InLoc),
 
             NewCount = 1 + (if NewSecond == Second -> Count; true -> 0 end),
@@ -100,14 +100,14 @@ loop(Parent, Debug, St) ->
                     ok
             end,
 
-            OutLoc = {out, {handle, NewCount}, From},
+            OutLoc = {out, handle, Msg},
             Debug3 = sys:handle_debug(Debug2, ?WRITE_DEBUG, Name, OutLoc),
 
             NewSt = St#st{
                 second = NewSecond,
                 count = NewCount
             },
-            loop(Parent, Debug3, NewSt);
+            loop(Parent, Debug3, NewSt)
     end.
 
 
