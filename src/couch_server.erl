@@ -30,7 +30,7 @@
 -define(DBS, couch_dbs).
 -define(PIDS, couch_dbs_pid_to_name).
 
--define(TARGET, couch_server).
+-define(BUFFER, couch_server).
 
 -define(MAX_DBS_OPEN, 100).
 -define(RELISTEN_DELAY, 5000).
@@ -68,7 +68,7 @@ get_uuid() ->
 
 get_stats() ->
     {ok, #server{start_time=Time,dbs_open=Open}} =
-            gen_server:call(?TARGET, get_server),
+            gen_server:call(?BUFFER, get_server),
     [{start_time, ?l2b(Time)}, {dbs_open, Open}].
 
 sup_start_link() ->
@@ -85,7 +85,7 @@ open(DbName, Options0) ->
     _ ->
         Timeout = couch_util:get_value(timeout, Options, infinity),
         Create = couch_util:get_value(create_if_missing, Options, false),
-        case gen_server:call(?TARGET, {open, DbName, Options}, Timeout) of
+        case gen_server:call(?BUFFER, {open, DbName, Options}, Timeout) of
         {ok, #db{fd=Fd} = Db} ->
             update_lru(DbName, Options),
             {ok, Db#db{user_ctx=Ctx, fd_monitor=erlang:monitor(process,Fd)}};
@@ -99,16 +99,16 @@ open(DbName, Options0) ->
 
 update_lru(DbName, Options) ->
     case lists:member(sys_db, Options) of
-        false -> gen_server:cast(?TARGET, {update_lru, DbName});
+        false -> gen_server:cast(?BUFFER, {update_lru, DbName});
         true -> ok
     end.
 
 close_lru() ->
-    gen_server:call(?TARGET, close_lru).
+    gen_server:call(?BUFFER, close_lru).
 
 create(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
-    case gen_server:call(?TARGET, {create, DbName, Options}, infinity) of
+    case gen_server:call(?BUFFER, {create, DbName, Options}, infinity) of
     {ok, #db{fd=Fd} = Db} ->
         Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
         {ok, Db#db{user_ctx=Ctx, fd_monitor=erlang:monitor(process,Fd)}};
@@ -117,7 +117,7 @@ create(DbName, Options0) ->
     end.
 
 delete(DbName, Options) ->
-    gen_server:call(?TARGET, {delete, DbName, Options}, infinity).
+    gen_server:call(?BUFFER, {delete, DbName, Options}, infinity).
 
 maybe_add_sys_db_callbacks(DbName, Options) when is_binary(DbName) ->
     maybe_add_sys_db_callbacks(?b2l(DbName), Options);
@@ -254,7 +254,7 @@ all_databases() ->
     {ok, lists:usort(DbList)}.
 
 all_databases(Fun, Acc0) ->
-    {ok, #server{root_dir=Root}} = gen_server:call(?TARGET, get_server),
+    {ok, #server{root_dir=Root}} = gen_server:call(?BUFFER, get_server),
     NormRoot = couch_util:normpath(Root),
     FinalAcc = try
     filelib:fold_files(Root,
@@ -314,7 +314,9 @@ open_async(Server, From, DbName, Options) ->
             Error ->
                 Error
         end,
-        gen_server:call(?TARGET, {open_result, T0, DbName, Result}, infinity),
+        % Skip the message queue buffer for database
+        % open results
+        gen_server:call(?MODULE, {open_result, T0, DbName, Result}, infinity),
         unlink(Parent)
     end),
     ReqType = case lists:member(create, Options) of
