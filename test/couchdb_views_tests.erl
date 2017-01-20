@@ -528,7 +528,7 @@ view_cleanup(DbName) ->
 
 count_users(DbName) ->
     {ok, Db} = couch_db:open_int(DbName, [?ADMIN_CTX]),
-    {monitored_by, Monitors} = erlang:process_info(Db#db.main_pid, monitored_by),
+    {monitored_by, Monitors} = erlang:process_info(Db#db.fd, monitored_by),
     ok = couch_db:close(Db),
     length(lists:usort(Monitors) -- [self()]).
 
