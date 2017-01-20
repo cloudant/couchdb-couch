@@ -80,14 +80,12 @@ open(DbName, Options0) ->
     Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
     case ets:lookup(?DBS, DbName) of
     [#db{fd=Fd, fd_monitor=Lock} = Db] when Lock =/= locked ->
-        update_lru(DbName, Options),
         {ok, Db#db{user_ctx=Ctx, fd_monitor=erlang:monitor(process,Fd)}};
     _ ->
         Timeout = couch_util:get_value(timeout, Options, infinity),
         Create = couch_util:get_value(create_if_missing, Options, false),
         case gen_server:call(?BUFFER, {open, DbName, Options}, Timeout) of
         {ok, #db{fd=Fd} = Db} ->
-            update_lru(DbName, Options),
             {ok, Db#db{user_ctx=Ctx, fd_monitor=erlang:monitor(process,Fd)}};
         {not_found, no_db_file} when Create ->
             couch_log:warning("creating missing database: ~s", [DbName]),
@@ -95,12 +93,6 @@ open(DbName, Options0) ->
         Error ->
             Error
         end
-    end.
-
-update_lru(DbName, Options) ->
-    case lists:member(sys_db, Options) of
-        false -> gen_server:cast(?BUFFER, {update_lru, DbName});
-        true -> ok
     end.
 
 close_lru() ->
