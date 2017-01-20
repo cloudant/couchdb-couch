@@ -16,32 +16,25 @@
 -include_lib("couch/include/couch_db.hrl").
 
 new() ->
-    {gb_trees:empty(), dict:new()}.
+    {ok, KHash} = khash:new(),
+    KHash.
 
-insert(DbName, {Tree0, Dict0}) ->
-    Lru = erlang:now(),
-    {gb_trees:insert(Lru, DbName, Tree0), dict:store(DbName, Lru, Dict0)}.
+insert(DbName, KHash) ->
+    ok = khash:put(KHash, DbName, nil),
+    KHash.
 
-update(DbName, {Tree0, Dict0}) ->
-    case dict:find(DbName, Dict0) of
-    {ok, Old} ->
-        New = erlang:now(),
-        Tree = gb_trees:insert(New, DbName, gb_trees:delete(Old, Tree0)),
-        Dict = dict:store(DbName, New, Dict0),
-        {Tree, Dict};
-    error ->
-        % We closed this database before processing the update.  Ignore
-        {Tree0, Dict0}
-    end.
+update(_DbName, KHash) ->
+    KHash.
 
-close({Tree, _} = Cache) ->
-    close_int(gb_trees:next(gb_trees:iterator(Tree)), Cache).
+close(KHash) ->
+    {ok, Iter} = khash:iter(KHash),
+    close_int(get_next(Iter), Iter, KHash).
 
 %% internals
 
-close_int(none, _) ->
+close_int(end_of_table, _Iter, _KHash) ->
     erlang:error(all_dbs_active);
-close_int({Lru, DbName, Iter}, {Tree, Dict} = Cache) ->
+close_int(DbName, Iter, KHash) ->
     case ets:update_element(couch_dbs, DbName, {#db.fd_monitor, locked}) of
     true ->
         [#db{main_pid = Pid} = Db] = ets:lookup(couch_dbs, DbName),
@@ -49,14 +42,24 @@ close_int({Lru, DbName, Iter}, {Tree, Dict} = Cache) ->
             true = ets:delete(couch_dbs, DbName),
             true = ets:delete(couch_dbs_pid_to_name, Pid),
             exit(Pid, kill),
-            {gb_trees:delete(Lru, Tree), dict:erase(DbName, Dict)};
+            ok = khash:del(KHash, DbName),
+            KHash;
         false ->
             true = ets:update_element(couch_dbs, DbName, {#db.fd_monitor, nil}),
             couch_stats:increment_counter([couchdb, couch_server, lru_skip]),
-            close_int(gb_trees:next(Iter), update(DbName, Cache))
+            close_int(get_next(Iter), Iter, KHash)
         end;
     false ->
-        NewTree = gb_trees:delete(Lru, Tree),
-        NewIter = gb_trees:iterator(NewTree),
-        close_int(gb_trees:next(NewIter), {NewTree, dict:erase(DbName, Dict)})
+        ok = khash:del(KHash, DbName),
+        {ok, NewIter} = khash:iter(KHash),
+        close_int(get_next(NewIter), NewIter, KHash)
+    end.
+
+
+get_next(Iter) ->
+    case khash:iter_next(Iter) of
+        {DbName, _} ->
+            DbName;
+        end_of_table ->
+            end_of_table
     end.
