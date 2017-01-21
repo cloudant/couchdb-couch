@@ -276,8 +276,7 @@ maybe_close_idle(#mon_state{open=Open, max_open=Max}=State) when Open < Max ->
 
 maybe_close_idle(State) ->
     try
-        close_idle(State),
-        {ok, State}
+        {ok, close_idle(State)}
     catch error:all_active ->
         {error, all_active}
     end.
@@ -303,7 +302,7 @@ close_idle(State) ->
 close_idle(_State, '$end_of_table') ->
     erlang:error(all_active);
 
-close_idle(State, Name) when is_binary(Name) ->
+close_idle(State, Name) ->
     #mon_state{mod=Mod} = State,
     case lookup(Mod, name, Name) of
         {ok, Value} ->
