@@ -37,7 +37,8 @@
     lookup/3,
     maybe_close_idle/1,
     incref/2,
-    num_open/1
+    num_open/1,
+    set_max_open/2
 ]).
 
 -record(mon_state, {
@@ -211,7 +212,7 @@ do_handle_info(Msg, St) ->
 
 
 behaviour_info(callbacks) ->
-    [{close,1}, {tab_name,1}];
+    [{close,2}, {tab_name,1}];
 
 
 behaviour_info(_) ->
@@ -276,10 +277,17 @@ maybe_close_idle(#mon_state{open=Open, max_open=Max}=State) when Open < Max ->
 maybe_close_idle(State) ->
     try
         close_idle(State),
-        {ok, closed(State, [])}
+        {ok, State}
     catch error:all_active ->
         {error, all_active}
     end.
+
+set_max_open(State, Max) ->
+    #mon_state{max_open=OldMax} = State,
+    lists:foldl(fun(_, StateAcc) ->
+        {ok, NewStateAcc} = maybe_close_idle(StateAcc),
+        NewStateAcc
+    end, State#mon_state{max_open=Max}, lists:seq(1, max(0, OldMax-Max))).
 
 
 close_idle(State) ->
@@ -301,14 +309,14 @@ close_idle(State, Name) when is_binary(Name) ->
         {ok, Value} ->
             true = ets:delete(Mod:tab_name(idle), Name),
             case Mod:close(Name, Value) of
-                true ->
-                    ok;
+                {true, SysOwned} ->
+                    closed(State, SysOwned);
                 false ->
-                    close_idle(ets:next(Mod:tab_name(idle), Name))
+                    close_idle(State, ets:next(Mod:tab_name(idle), Name))
             end;
-        [] ->
+        not_found ->
             true = ets:delete(Mod:tab_name(idle), Name),
-            close_idle(ets:next(Mod:tab_name(idle), Name))
+            close_idle(State, ets:next(Mod:tab_name(idle), Name))
     end.
 
 
