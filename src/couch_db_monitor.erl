@@ -14,35 +14,53 @@
 
 
 -export([
-    spawn_link/2,
+    spawn_link/3,
     close/1,
-    set_db_pid/2,
+    set_pid/2,
 
     notify/1,
     notify/2,
-    cancel/2
+    cancel/3
 ]).
 
 -export([
-    init/2
+    init/3
 ]).
+
+-export([behaviour_info/1]).
+-export([
+    opened/2,
+    closed/2,
+    new/2,
+    delete/3,
+    insert/4,
+    lookup/3,
+    maybe_close_idle/1,
+    incref/2,
+    num_open/1
+]).
+
+-record(mon_state, {
+    mod,
+    max_open,
+    open=0,
+    sys_open=0
+}).
 
 
 -record(st, {
-    dbname,
-    is_sys_db,
-    db_ref,
+    mod,
+    name,
+    type,
+    is_sys,
+    ref,
     client_refs,
     closing
 }).
 
 
--define(COUNTERS, couch_dbs_counters).
--define(IDLE, couch_dbs_idle).
-
-
-spawn_link(DbName, IsSysDb) ->
-    erlang:spawn_link(?MODULE, init, [DbName, IsSysDb]).
+spawn_link(Mod, Name, IsSys) ->
+    erlang:spawn_link(?MODULE, init, [Mod, Name, IsSys]).
 
 
 close(Monitor) ->
@@ -50,8 +68,8 @@ close(Monitor) ->
     ok.
 
 
-set_db_pid(Monitor, DbPid) ->
-    Monitor ! {set_db_pid, DbPid},
+set_pid(Monitor, Pid) ->
+    Monitor ! {set_pid, Pid},
     ok.
 
 
@@ -67,12 +85,12 @@ notify(Monitor, {Client, _}) when is_pid(Client) ->
     notify(Monitor, Client).
 
 
-cancel(DbName, {Client, Monitor, IsSysDb})
+cancel(Mod, Name, {Client, Monitor, IsSys})
         when Client == self(), is_pid(Monitor) ->
     Monitor ! {cancel, self()},
-    case (catch ets:update_counter(?COUNTERS, DbName, -1)) of
-        0 when not IsSysDb ->
-            true = ets:insert(?IDLE, {DbName}),
+    case (catch ets:update_counter(Mod:tab_name(counters), Name, -1)) of
+        0 when not IsSys ->
+            true = insert(Mod, idle, Name, ok),
             ok;
         _ ->
             ok
@@ -80,16 +98,18 @@ cancel(DbName, {Client, Monitor, IsSysDb})
 
 % This happens if a #db{} record is shared across processes
 % like fabric does with fabric_util:get_db/2
-cancel(_DbName, {Client, Monitor, _}) when is_pid(Client), is_pid(Monitor) ->
+cancel(_Mod, _Name, {Client, Monitor, _})
+        when is_pid(Client), is_pid(Monitor) ->
     ok.
 
 
-init(DbName, IsSysDb) ->
+init(Mod, Name, IsSys) ->
     {ok, CRefs} = khash:new(),
     loop(#st{
-        dbname = DbName,
-        is_sys_db = IsSysDb,
-        db_ref = undefined,
+        name = Name,
+        mod = Mod,
+        is_sys = IsSys,
+        ref = undefined,
         client_refs = CRefs,
         closing = false
     }).
@@ -99,13 +119,13 @@ init(DbName, IsSysDb) ->
 handle_info(exit, St) ->
     {stop, normal, St};
 
-handle_info({set_db_pid, Pid}, #st{db_ref = undefined} = St) ->
+handle_info({set_pid, Pid}, #st{ref = undefined} = St) ->
     Ref = erlang:monitor(process, Pid),
-    {noreply, St#st{db_ref = Ref}};
+    {noreply, St#st{ref = Ref}};
 
-handle_info({set_db_pid, Pid}, #st{db_ref = Ref} = St) when is_reference(Ref) ->
+handle_info({set_pid, Pid}, #st{ref = Ref} = St) when is_reference(Ref) ->
     erlang:demonitor(Ref, [flush]),
-    handle_info({set_db_pid, Pid}, St#st{db_ref = undefined});
+    handle_info({set_pid, Pid}, St#st{ref = undefined});
 
 handle_info({notify, Client}, St) when is_pid(Client) ->
     case khash:get(St#st.client_refs, Client) of
@@ -117,7 +137,7 @@ handle_info({notify, Client}, St) when is_pid(Client) ->
                 0 ->
                     % Our first monitor after being idle
                     khash:put(St#st.client_refs, Client, {Ref, 1}),
-                    true = ets:delete(?IDLE, St#st.dbname);
+                    delete(St#st.mod, idle, St#st.name);
                 N when is_integer(N), N > 0 ->
                     % Still not idle
                     khash:put(St#st.client_refs, Client, {Ref, 1}),
@@ -137,13 +157,14 @@ handle_info({cancel, Client}, St) when is_pid(Client) ->
     end,
     {noreply, St};
 
-handle_info({'DOWN', Ref, process, _, _}, #st{db_ref = Ref} = St) ->
+handle_info({'DOWN', Ref, process, _, _}, #st{ref = Ref} = St) ->
     {stop, normal, St};
 
 handle_info({'DOWN', _Ref, process, Pid, _Reason}, St) ->
+    #st{name=Name, mod=Mod} = St,
     case khash:get(St#st.client_refs, Pid) of
         {Ref, N} when is_reference(Ref), is_integer(N), N > 0 ->
-            ets:update_counter(?COUNTERS, St#st.dbname, -N),
+            ets:update_counter(Mod:tab_name(counters), Name, -N),
             khash:del(St#st.client_refs, Pid),
             maybe_set_idle(St);
         undefined ->
@@ -158,13 +179,13 @@ handle_info(Msg, St) ->
 
 maybe_set_idle(St) ->
     case khash:size(St#st.client_refs) of
-        0 when St#st.is_sys_db ->
+        0 when St#st.is_sys ->
             % System dbs don't go idle so they're
             % never a candidate to get closed
             ok;
         0 ->
             % We're now idle
-            true = ets:insert(?IDLE, {St#st.dbname});
+            insert(St#st.mod, idle, St#st.name, {});
         N when is_integer(N), N > 0 ->
             % We have other clients
             ok
@@ -187,3 +208,128 @@ do_handle_info(Msg, St) ->
     catch T:R ->
         exit({T, R})
     end.
+
+
+behaviour_info(callbacks) ->
+    [{close,1}, {tab_name,1}];
+
+
+behaviour_info(_) ->
+    undefined.
+
+
+opened(State, IsSysOwned) ->
+    case IsSysOwned of
+        true -> State#mon_state{sys_open=State#mon_state.sys_open + 1};
+        false -> State#mon_state{open=State#mon_state.open + 1}
+    end.
+
+
+closed(State, IsSysOwned) ->
+    case IsSysOwned of
+        true -> State#mon_state{sys_open=State#mon_state.sys_open - 1};
+        false -> State#mon_state{open=State#mon_state.open - 1}
+    end.
+
+
+-spec new(atom(), pos_integer()) -> #mon_state{}.
+new(Mod, MaxOpen) ->
+    ets:new(Mod:tab_name(name), [public, set, named_table]),
+    ets:new(Mod:tab_name(pid), [public, set, named_table]),
+    ets:new(Mod:tab_name(counters), [set, public, named_table]),
+    ets:new(Mod:tab_name(idle), [set, public, named_table]),
+    #mon_state{mod=Mod, max_open=MaxOpen}.
+
+
+delete(State, Name, Pid) when is_record(State, mon_state) ->
+    #mon_state{mod=Mod} = State,
+    delete(Mod, Name, Pid);
+
+delete(Mod, Name, Pid) when is_atom(Mod) ->
+    true = ets:delete(Mod:tab_name(counters), Name),
+    true = ets:delete(Mod:tab_name(name), Name),
+    true = ets:delete(Mod:tab_name(pid), Pid),
+    true = ets:delete(Mod:tab_name(idle), Name),
+    ok.
+
+
+insert(State, Tab, Key, Value) when is_record(State, mon_state) ->
+    insert(State#mon_state.mod, Tab, Key, Value);
+
+insert(Mod, Tab, Key, Value) when is_atom(Mod) ->
+    ets:insert(Mod:tab_name(Tab), {Key, Value}).
+
+
+lookup(State, Type, Key) when is_record(State, mon_state) ->
+    lookup(State#mon_state.mod, Type, Key);
+
+lookup(Mod, Type, Key) ->
+    case ets:lookup(Mod:tab_name(Type), Key) of
+        [{_Key, Value}] -> {ok, Value};
+        [] -> not_found
+    end.
+
+
+maybe_close_idle(#mon_state{open=Open, max_open=Max}=State) when Open < Max ->
+    {ok, State};
+
+maybe_close_idle(State) ->
+    try
+        close_idle(State),
+        {ok, closed(State, [])}
+    catch error:all_active ->
+        {error, all_active}
+    end.
+
+
+close_idle(State) ->
+    #mon_state{mod=Mod} = State,
+    ets:safe_fixtable(Mod:tab_name(idle), true),
+    try
+        close_idle(State, ets:first(Mod:tab_name(idle)))
+    after
+        ets:safe_fixtable(Mod:tab_name(idle), false)
+    end.
+
+
+close_idle(_State, '$end_of_table') ->
+    erlang:error(all_active);
+
+close_idle(State, Name) when is_binary(Name) ->
+    #mon_state{mod=Mod} = State,
+    case lookup(Mod, name, Name) of
+        {ok, Value} ->
+            true = ets:delete(Mod:tab_name(idle), Name),
+            case Mod:close(Name, Value) of
+                true ->
+                    ok;
+                false ->
+                    close_idle(ets:next(Mod:tab_name(idle), Name))
+            end;
+        [] ->
+            true = ets:delete(Mod:tab_name(idle), Name),
+            close_idle(ets:next(Mod:tab_name(idle), Name))
+    end.
+
+
+% incref is the only state-updating operation which can be performed
+% concurrently
+incref(State, Name) when is_record(State, mon_state) ->
+    incref(State#mon_state.mod, Name);
+
+incref(Mod, Name) when is_atom(Mod) ->
+    case (catch ets:update_counter(Mod:tab_name(counters), Name, 1)) of
+        1 ->
+            ets:delete(Mod:tab_name(idle), Name),
+            ok;
+        N when is_integer(N), N > 0 ->
+            ok;
+        N when is_integer(N) ->
+            {invalid_refcount, N};
+        {'EXIT', {badarg, _}} ->
+            missing_counter
+    end.
+
+
+num_open(State) ->
+    State#mon_state.open.
