@@ -13,7 +13,7 @@
 -module(couch_server).
 -behaviour(gen_server).
 -behaviour(config_listener).
--behaviour(couch_db_monitor).
+-behaviour(couch_monitor_server).
 -vsn(3).
 
 -export([open/2,create/2,delete/2,get_version/0,get_version/1,get_uuid/0]).
@@ -25,7 +25,7 @@
 % config_listener api
 -export([handle_config_change/5, handle_config_terminate/3]).
 
-% couch_db_monitor api
+% couch_monitor_server api
 -export([close/2, tab_name/1]).
 
 -include_lib("couch/include/couch_db.hrl").
@@ -74,7 +74,7 @@ get_uuid() ->
 get_stats() ->
     {ok, #server{start_time=Time,monitor_state=Mon}} =
             gen_server:call(couch_server, get_server),
-    [{start_time, ?l2b(Time)}, {dbs_open, couch_db_monitor:num_open(Mon)}].
+    [{start_time, ?l2b(Time)}, {dbs_open, couch_monitor_server:num_open(Mon)}].
 
 sup_start_link() ->
     gen_server:start_link({local, couch_server}, couch_server, [], []).
@@ -83,14 +83,14 @@ sup_start_link() ->
 open(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
     Ctx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
-    case couch_db_monitor:incref(?MODULE, DbName) of
+    case couch_monitor_server:incref(?MODULE, DbName) of
     ok ->
         {ok, #entry{
             db = Db,
             monitor = Monitor,
             status = active
-        }} = couch_db_monitor:lookup(?MODULE, name, DbName),
-        ok = couch_db_monitor:notify(Monitor),
+        }} = couch_monitor_server:lookup(?MODULE, name, DbName),
+        ok = couch_monitor:notify(Monitor),
         {ok, Db#db{
             user_ctx = Ctx,
             fd_monitor = {self(), Monitor, couch_db:is_system_db(Db)}
@@ -195,7 +195,7 @@ init([]) ->
     ok = config:listen_for_changes(?MODULE, nil),
     ok = couch_file:init_delete_dir(RootDir),
     hash_admin_passwords(),
-    MonState = couch_db_monitor:new(?MODULE, MaxDbsOpen),
+    MonState = couch_monitor_server:new(?MODULE, MaxDbsOpen),
     process_flag(trap_exit, true),
     {ok, #server{root_dir=RootDir,
                 monitor_state=MonState,
@@ -277,7 +277,7 @@ make_room(Server, Options) ->
     case lists:member(sys_db, Options) of
         false ->
             #server{monitor_state=MonState} = Server,
-            case couch_db_monitor:maybe_close_idle(MonState) of
+            case couch_monitor_server:maybe_close_idle(MonState) of
                 {ok, NewMonState} ->
                     {ok, Server#server{monitor_state=NewMonState}};
                 Error ->
@@ -287,30 +287,6 @@ make_room(Server, Options) ->
             {ok, Server}
     end.
 
-
-% couch_db_monitor behaviour implementation
-tab_name(name) -> couch_db;
-tab_name(pid) -> couch_db_by_pid;
-tab_name(counters) -> couch_db_counters;
-tab_name(idle) -> couch_db_idle.
-
-close(_DbName, #entry{db=#db{compactor_pid = Pid}}) when Pid /= nil ->
-    false;
-close(_DbName, #entry{db=#db{waiting_delayed_commit = WDC}}) when WDC /= nil ->
-    false;
-close(DbName, #entry{db=Db, monitor=Monitor, sys_db=IsSysDb}) ->
-    case ets:select_delete(tab_name(counters), [{{DbName, 0}, [], [true]}]) of
-        1 ->
-            exit(Monitor, kill),
-            put(last_db_closed, DbName),
-            gen_server:cast(Db#db.fd, close),
-            exit(Db#db.main_pid, kill),
-            true = ets:delete(tab_name(name), DbName),
-            true = ets:delete(tab_name(pid), Db#db.main_pid),
-            {true, IsSysDb};
-        0 ->
-            false
-    end.
 
 open_async(Server, From, DbName, Options) ->
     Parent = self(),
@@ -346,15 +322,15 @@ open_async(Server, From, DbName, Options) ->
             header = undefined,
             options = Options
         },
-        monitor = couch_db_monitor:spawn_link(?MODULE, DbName, IsSysDb),
+        monitor = couch_monitor:spawn_link(?MODULE, DbName, IsSysDb),
         status = inactive,
         req_type = ReqType,
         waiters = [From],
         sys_db = IsSysDb
     },
-    couch_db_monitor:insert(?MODULE, name, DbName, Entry),
-    couch_db_monitor:insert(?MODULE, pid, Opener, DbName),
-    NewMon = couch_db_monitor:opened(Server#server.monitor_state, lists:member(sys_db, Options)),
+    couch_monitor_server:insert(?MODULE, name, DbName, Entry),
+    couch_monitor_server:insert(?MODULE, pid, Opener, DbName),
+    NewMon = couch_monitor_server:opened(Server#server.monitor_state, lists:member(sys_db, Options)),
     Server#server{monitor_state=NewMon}.
     %verify_size(NewServer).
     %TotalOpen = NewServer#server.dbs_open + NewServer#server.sys_dbs_open,
@@ -367,15 +343,15 @@ open_async(Server, From, DbName, Options) ->
     %NewServer.
 
 handle_call(open_dbs_count, _From, Server) ->
-    {reply, couch_db_monitor:num_open(Server#server.monitor_state), Server};
+    {reply, couch_monitor_server:num_open(Server#server.monitor_state), Server};
 handle_call({set_max_dbs_open, Max}, _From, Server) ->
-    Mon = couch_db_monitor:set_max_open(Server#server.monitor_state, Max),
+    Mon = couch_monitor_server:set_max_open(Server#server.monitor_state, Max),
     {reply, ok, Server#server{monitor_state=Mon}};
 handle_call(get_server, _From, Server) ->
     {reply, {ok, Server}, Server};
 handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
     link(Db#db.main_pid),
-    ok = couch_db_monitor:delete(Server#server.monitor_state, pid, FromPid),
+    ok = couch_monitor_server:delete(Server#server.monitor_state, pid, FromPid),
     OpenTime = timer:now_diff(os:timestamp(), T0) / 1000,
     couch_stats:update_histogram([couchdb, db_open_time], OpenTime),
     {ok, #entry{
@@ -383,8 +359,8 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
         req_type = ReqType,
         waiters = Waiters,
         status = inactive
-    } = Entry} = couch_db_monitor:lookup(?MODULE, name, DbName),
-    ok = couch_db_monitor:set_pid(Monitor, Db#db.main_pid),
+    } = Entry} = couch_monitor_server:lookup(?MODULE, name, DbName),
+    ok = couch_monitor:set_pid(Monitor, Db#db.main_pid),
     % Cancel the creation request if it exists.
     case ReqType of
         {create, DbName, _Options, CrFrom} ->
@@ -398,14 +374,14 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
         req_type = undefined,
         waiters = undefined
     },
-    couch_db_monitor:insert(?MODULE, name, DbName, NewEntry),
-    couch_db_monitor:insert(?MODULE, pid, Db#db.main_pid, DbName),
-    couch_db_monitor:insert(?MODULE, counters, DbName, 0),
+    couch_monitor_server:insert(?MODULE, name, DbName, NewEntry),
+    couch_monitor_server:insert(?MODULE, pid, Db#db.main_pid, DbName),
+    couch_monitor_server:insert(?MODULE, counters, DbName, 0),
 
     lists:foreach(fun(From) ->
         {Client, _} = From,
-        ok = couch_db_monitor:incref(?MODULE, DbName),
-        ok = couch_db_monitor:notify(Monitor, Client),
+        ok = couch_monitor_server:incref(?MODULE, DbName),
+        ok = couch_monitor:notify(Monitor, Client),
         ClientMon = {Client, Monitor, couch_db:is_system_db(Db)},
         gen_server:reply(From, {ok, Db#db{fd_monitor = ClientMon}})
     end, Waiters),
@@ -414,7 +390,7 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
 handle_call({open_result, T0, DbName, {error, eexist}}, From, Server) ->
     handle_call({open_result, T0, DbName, file_exists}, From, Server);
 handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
-    {ok, #entry{status = inactive} = Entry} = couch_db_monitor:lookup(?MODULE, name, DbName),
+    {ok, #entry{status = inactive} = Entry} = couch_monitor_server:lookup(?MODULE, name, DbName),
     #entry{
         db = Db,
         monitor = Monitor,
@@ -422,23 +398,24 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
         waiters = Waiters
     } = Entry,
     [gen_server:reply(From, Error) || From <- Waiters],
-    ok = couch_db_monitor:close(Monitor),
+    ok = couch_monitor:close(Monitor),
     couch_log:info("open_result error ~p for ~s", [Error, DbName]),
-    ok = couch_db_monitor:delete(?MODULE, DbName, FromPid),
+    ok = couch_monitor_server:delete(?MODULE, DbName, FromPid),
     NewServer = case ReqType of
         {create, DbName, Options, CrFrom} ->
             open_async(Server, CrFrom, DbName, Options);
         _ ->
             Server
     end,
-    NewMonState = couch_db_monitor:opened(NewServer#server.monitor_state, lists:member(sys_db, Db#db.options)),
+    NewMonState = couch_monitor_server:opened(
+        NewServer#server.monitor_state, lists:member(sys_db, Db#db.options)),
     {reply, ok, NewServer#server{monitor_state=NewMonState}};
 handle_call({open, DbName, Options}, From, Server) ->
     case should_drop(Options) of
     true ->
         {reply, timedout, Server};
     false ->
-        case couch_db_monitor:lookup(?MODULE, name, DbName) of
+        case couch_monitor_server:lookup(?MODULE, name, DbName) of
         not_found ->
             case make_room(Server, Options) of
             {ok, Server2} ->
@@ -453,7 +430,7 @@ handle_call({open, DbName, Options}, From, Server) ->
             NewEntry = Entry#entry{
                 waiters = [From | Waiters]
             },
-            couch_db_monitor:insert(?MODULE, name, DbName, NewEntry),
+            couch_monitor_server:insert(?MODULE, name, DbName, NewEntry),
             if length(Waiters) =< 10 -> ok; true ->
                 Fmt = "~b clients waiting to open db ~s",
                 couch_log:info(Fmt, [length(Waiters) + 1, DbName])
@@ -464,15 +441,15 @@ handle_call({open, DbName, Options}, From, Server) ->
                 db = Db,
                 monitor = Monitor
             } = Entry,
-            ok = couch_db_monitor:incref(?MODULE, DbName),
+            ok = couch_monitor_server:incref(?MODULE, DbName),
             {Client, _} = From,
-            ok = couch_db_monitor:notify(Monitor, Client),
+            ok = couch_monitor:notify(Monitor, Client),
             ClientMon = {Client, Monitor, couch_db:is_system_db(Db)},
             {reply, {ok, Db#db{fd_monitor = ClientMon}}, Server}
         end
     end;
 handle_call({create, DbName, Options}, From, Server) ->
-    case couch_db_monitor:lookup(?MODULE, name, DbName) of
+    case couch_monitor_server:lookup(?MODULE, name, DbName) of
     not_found ->
         case make_room(Server, Options) of
         {ok, Server2} ->
@@ -488,7 +465,7 @@ handle_call({create, DbName, Options}, From, Server) ->
         NewEntry = Entry#entry{
             req_type = {create, DbName, CrOptions, From}
         },
-        couch_db_monitor:insert(?MODULE, name, DbName, NewEntry),
+        couch_monitor_server:insert(?MODULE, name, DbName, NewEntry),
         {noreply, Server};
     {ok, #entry{}} ->
         {reply, file_exists, Server}
@@ -499,19 +476,20 @@ handle_call({delete, DbName, Options}, _From, Server) ->
     ok ->
         FullFilepath = get_full_filename(Server, DbNameList),
         Server2 =
-        case couch_db_monitor:lookup(?MODULE, name, DbName) of
+        case couch_monitor_server:lookup(?MODULE, name, DbName) of
         not_found -> Server;
         {ok, #entry{waiters = Waiters} = Entry} ->
             #entry{
                 db = Db,
                 waiters = Waiters
             } = Entry,
-            couch_db_monitor:delete(?MODULE, DbName, Db#db.main_pid),
+            couch_monitor_server:delete(?MODULE, DbName, Db#db.main_pid),
             exit(Db#db.main_pid, kill),
             if not is_list(Waiters) -> ok; true ->
                 [gen_server:reply(F, not_found) || F <- Waiters]
             end,
-            NewMonState = couch_db_monitor:closed(Server#server.monitor_state, lists:member(sys_db, Db#db.options)),
+            NewMonState = couch_monitor_server:closed(
+                Server#server.monitor_state, lists:member(sys_db, Db#db.options)),
             Server#server{monitor_state=NewMonState}
         end,
 
@@ -540,13 +518,13 @@ handle_call({delete, DbName, Options}, _From, Server) ->
     end;
 handle_call({db_updated, #db{}=Db}, _From, Server) ->
     #db{name = DbName, instance_start_time = StartTime} = Db,
-    try couch_db_monitor:lookup(?MODULE, name, DbName) of
+    try couch_monitor_server:lookup(?MODULE, name, DbName) of
         {ok, #entry{status = active} = Entry} ->
             #entry{
                 db = CurrDb
             } = Entry,
             if StartTime /= CurrDb#db.instance_start_time -> ok; true ->
-                couch_db_monitor:insert(?MODULE, name, DbName, Entry#entry{db=Db})
+                couch_monitor_server:insert(?MODULE, name, DbName, Entry#entry{db=Db})
             end;
         _ ->
             ok
@@ -564,9 +542,10 @@ code_change(_OldVsn, #server{}=State, _Extra) ->
 handle_info({'EXIT', _Pid, config_change}, Server) ->
     {stop, config_change, Server};
 handle_info({'EXIT', Pid, Reason}, Server) ->
-    case couch_db_monitor:lookup(?MODULE, pid, Pid) of
+    case couch_monitor_server:lookup(?MODULE, pid, Pid) of
     {ok, {Pid, DbName}} ->
-        {ok, #entry{db = Db, waiters = Waiters}} = couch_db_monitor:lookup(?MODULE, name, DbName),
+        {ok, #entry{db = Db, waiters = Waiters}} = couch_monitor_server:lookup(
+            ?MODULE, name, DbName),
         if Reason /= snappy_nif_not_loaded -> ok; true ->
             Msg = io_lib:format("To open the database `~s`, Apache CouchDB "
                 "must be built with Erlang OTP R13B04 or higher.", [DbName]),
@@ -576,8 +555,9 @@ handle_info({'EXIT', Pid, Reason}, Server) ->
         if not is_list(Waiters) -> ok; true ->
             [gen_server:reply(From, Reason) || From <- Waiters]
         end,
-        couch_db_monitor:delete(?MODULE, DbName, Pid),
-        NewMonState = couch_db_monitor:closed(Server#server.monitor_state, lists:member(sys_db, Db#db.options)),
+        couch_monitor_server:delete(?MODULE, DbName, Pid),
+        NewMonState = couch_monitor_server:closed(
+            Server#server.monitor_state, lists:member(sys_db, Db#db.options)),
         {noreply, Server#server{monitor_state=NewMonState}};
     not_found ->
         {noreply, Server}
@@ -596,6 +576,32 @@ should_drop(Options) ->
     % have to devide by 1000
     Diff = timer:now_diff(os:timestamp(), Timestamp) / 1000,
     Timeout /= infinity andalso Diff > (Timeout * 1.25).
+
+
+% couch_monitor_server behaviour implementation
+tab_name(name) -> couch_db;
+tab_name(pid) -> couch_db_by_pid;
+tab_name(counters) -> couch_db_counters;
+tab_name(idle) -> couch_db_idle.
+
+
+close(_DbName, #entry{db=#db{compactor_pid = Pid}}) when Pid /= nil ->
+    false;
+close(_DbName, #entry{db=#db{waiting_delayed_commit = WDC}}) when WDC /= nil ->
+    false;
+close(DbName, #entry{db=Db, monitor=Monitor, sys_db=IsSysDb}) ->
+    case ets:select_delete(tab_name(counters), [{{DbName, 0}, [], [true]}]) of
+        1 ->
+            exit(Monitor, kill),
+            put(last_db_closed, DbName),
+            gen_server:cast(Db#db.fd, close),
+            exit(Db#db.main_pid, kill),
+            true = ets:delete(tab_name(name), DbName),
+            true = ets:delete(tab_name(pid), Db#db.main_pid),
+            {true, IsSysDb};
+        0 ->
+            false
+    end.
 
 
 -ifdef(TEST).

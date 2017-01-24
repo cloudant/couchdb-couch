@@ -121,7 +121,7 @@ ensure_full_commit(Db, RequiredSeq) ->
     {ok, StartTime}.
 
 close(#db{fd_monitor = Monitor} = Db) ->
-    ok = couch_db_monitor:cancel(couch_server, Db#db.name, Monitor).
+    ok = couch_monitor:cancel(couch_server, Db#db.name, Monitor).
 
 is_idle(#db{compactor_pid=nil, waiting_delayed_commit=nil} = Db) ->
     monitored_by(Db) == [];
