@@ -11,7 +11,7 @@
 % the License.
 -module(rfc3394).
 
--export([wrap/2, unwrap/2, split/1]).
+-export([wrap/2, unwrap/2]).
 
 wrap(Key, PlainText)
   when bit_size(PlainText) >= 128,

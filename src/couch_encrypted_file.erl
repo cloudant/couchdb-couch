@@ -147,8 +147,11 @@ maybe_overwrite(Fd, Options) ->
 
 
 pread_binary_int(#file{} = File, Pos) ->
-    {ok, <<Size:32, ExpectedHmac:32/binary>>} = file:pread(File#file.fd, Pos  + 3, 36),
-    {ok, <<CipherText/binary>>} = file:pread(File#file.fd, Pos + 39, Size),
+    PosBin = encode_int(Pos),
+    PosBinSize = size(PosBin),
+    {ok, <<$B, $I, $N, PosBin:PosBinSize/binary, Size:32, ExpectedHmac:32/binary>>} =
+        file:pread(File#file.fd, Pos, 39 + PosBinSize),
+    {ok, <<CipherText/binary>>} = file:pread(File#file.fd, Pos + 39 + size(PosBin), Size),
 
     %% check hmac without timing effect
     ActualHmac = crypto:hmac(sha256, File#file.key, [<<Size:32>>, CipherText]),
@@ -165,9 +168,15 @@ append_binary_int(#file{} = File, PlainText) when is_binary(PlainText) ->
     Size = size(CipherText),
     Hmac = crypto:hmac(sha256, File#file.key, [<<Size:32>>, CipherText]),
 
-    Bytes = [<<Size:32>>, Hmac, CipherText],
-    ok = file:write(File#file.fd, [<<$B, $I, $N>>, Bytes]),
-    File#file{eof = File#file.eof + 3 + iolist_size(Bytes)}.
+    Bytes = [
+        <<$B, $I, $N>>, %% conspicuous marker for DR
+        encode_int(File#file.eof), %% plaintext for DR
+        <<Size:32>>,
+        Hmac,
+        CipherText
+    ],
+    ok = file:write(File#file.fd, Bytes),
+    File#file{eof = File#file.eof + iolist_size(Bytes)}.
 
 
 encrypt(Key, Pos, PlainText) ->
@@ -188,18 +197,28 @@ essiv(Key, Pos) ->
     {_, Result} = crypto:stream_encrypt(State, <<Pos:128>>),
     Result.
 
+
 init_file(KEK, #file{eof = 0} = File) ->
     Key = crypto:strong_rand_bytes(32),
     WrappedKey = rfc3394:wrap(KEK, Key),
-    ok = file:write(File#file.fd, [<<$K, $E, $Y>>, WrappedKey]),
+    ok = file:write(File#file.fd, [
+        <<$K, $E, $Y>>, %% conspicuous marker for DR
+        WrappedKey]),
     ok = file:sync(File#file.fd),
     File#file{eof = 3 + size(WrappedKey),
               key = Key};
 
+
 init_file(KEK, #file{} = File) ->
-    {ok, <<WrappedKey:40/binary>>} = file:pread(File#file.fd, 3, 40),
+    {ok, <<$K, $E, $Y, WrappedKey:40/binary>>} = file:pread(File#file.fd, 0, 43),
     Key = rfc3394:unwrap(KEK, WrappedKey),
     File#file{key = Key}.
+
+
+encode_int(Int) when is_integer(Int) ->
+    <<131, Rest/binary>> = term_to_binary(Int),
+    Rest.
+
 
 -ifdef(TEST).
 -include_lib("couch/include/couch_eunit.hrl").
