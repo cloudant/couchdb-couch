@@ -395,7 +395,8 @@ init({Filepath, Options, ReturnPid, Ref}) ->
     end.
 
 file_open_options(Options) ->
-    [read, raw, binary] ++ case lists:member(read_only, Options) of
+    ReadAhead = get_file_read_ahead_option(),
+    ReadAhead ++ [read, raw, binary] ++ case lists:member(read_only, Options) of
     true ->
         [];
     false ->
@@ -714,6 +715,14 @@ get_pread_limit() ->
     case config:get_integer("couchdb", "max_pread_size", 0) of
         N when N > 0 -> N;
         _ -> infinity
+    end.
+
+get_file_read_ahead_option() ->
+    case config:get_integer("couchdb", "file_read_ahead", 0) of
+        N when N > 0 ->
+            [{read_ahead, N}];
+        _ ->
+            []
     end.
 
 %% in event of a partially successful write.
