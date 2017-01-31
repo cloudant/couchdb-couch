@@ -14,8 +14,9 @@
 
 -record(file, {
     fd,
+    eof,
     key,
-    eof
+    iv = 0
 }).
 
 %% public API
@@ -34,7 +35,11 @@ pread_term(Pid, Pos) when is_pid(Pid), is_integer(Pos) ->
 
 
 pread_binary(Pid, Pos) when is_pid(Pid), is_integer(Pos) ->
-    gen_server:call(Pid, {pread_binary, Pos}, infinity).
+    {ok, Key, IV, CipherText, CipherTag} =
+        gen_server:call(Pid, {pread_binary, Pos}, infinity),
+    PlainText = crypto:block_decrypt(aes_gcm, Key, essiv(Key, IV),
+        {[], CipherText, CipherTag}),
+    {ok, PlainText}.
 
 
 append_term(Pid, Term) when is_pid(Pid) ->
@@ -42,8 +47,18 @@ append_term(Pid, Term) when is_pid(Pid) ->
     append_binary(Pid, Bin).
 
 
-append_binary(Pid, Bin) when is_pid(Pid), is_binary(Bin) ->
-    gen_server:call(Pid, {append_binary, Bin}, infinity).
+append_binary(Pid, PlainText) when is_pid(Pid), is_binary(PlainText) ->
+    {ok, Key, IV} = gen_server:call(Pid, get_key_iv, infinity),
+    {CipherText, CipherTag} = crypto:block_encrypt(aes_gcm,
+        Key, essiv(Key, IV), {[], PlainText, 16}),
+    Bytes = [
+        <<$B, $I, $N>>, %% conspicuous marker for DR
+        <<IV:32>>, %% plaintext for DR
+        <<(size(CipherText)):32>>,
+        CipherText,
+        CipherTag
+    ],
+    gen_server:call(Pid, {append_binary, Bytes}, infinity).
 
 
 sync(Pid) when is_pid(Pid) ->
@@ -53,6 +68,7 @@ sync(Pid) when is_pid(Pid) ->
 %% gen_server functions
 
 init({Filepath, Key, Options}) ->
+    process_flag(sensitive, true),
     OpenOptions = file_open_options(Options),
     case lists:member(create, Options) of
         true ->
@@ -78,16 +94,23 @@ init({Filepath, Key, Options}) ->
             end
     end.
 
+handle_call(get_key_iv, _From, #file{iv = IV} = File) when IV >= 4294967296 ->
+    {stop, iv_overflow, File};
+
+handle_call(get_key_iv, _From, #file{} = File0) ->
+    File1 = File0#file{iv = File0#file.iv + 1},
+    {reply, {ok, File0#file.key, File0#file.iv}, File1};
+
 handle_call({pread_binary, Pos}, _From, #file{} = File) ->
-    case pread_binary_int(File, Pos) of
-        {ok, Bin} ->
-            {reply, {ok, Bin}, File};
-        Else ->
-            {reply, Else, File}
-    end;
+    {ok, <<$B, $I, $N, IV:32, Size:32>>} =
+        file:pread(File#file.fd, Pos, 11),
+    {ok, <<CipherText:Size/binary, CipherTag:16/binary>>} =
+        file:pread(File#file.fd, Pos + 11, Size + 16),
+    {reply, {ok, File#file.key, IV, CipherText, CipherTag}, File};
 
 handle_call({append_binary, Bin}, _From, #file{} = File0) ->
-    File1 = append_binary_int(File0, Bin),
+    ok = file:write(File0#file.fd, Bin),
+    File1 = File0#file{eof = File0#file.eof + iolist_size(Bin)},
     {reply, {ok, File0#file.eof}, File1};
 
 handle_call(sync, _From, #file{} = File) ->
@@ -146,51 +169,6 @@ maybe_overwrite(Fd, Options) ->
     end.
 
 
-pread_binary_int(#file{} = File, Pos) ->
-    PosBin = encode_int(Pos),
-    PosBinSize = size(PosBin),
-    {ok, <<$B, $I, $N, PosBin:PosBinSize/binary, Size:32, ExpectedHmac:32/binary>>} =
-        file:pread(File#file.fd, Pos, 39 + PosBinSize),
-    {ok, <<CipherText/binary>>} = file:pread(File#file.fd, Pos + 39 + size(PosBin), Size),
-
-    %% check hmac without timing effect
-    ActualHmac = crypto:hmac(sha256, File#file.key, [<<Size:32>>, CipherText]),
-    case crypto:exor(ExpectedHmac, ActualHmac) of
-        <<0:256>> ->
-            {ok, decrypt(File#file.key, Pos, CipherText)};
-        _ ->
-            {error, hmac_verification_failed}
-    end.
-
-
-append_binary_int(#file{} = File, PlainText) when is_binary(PlainText) ->
-    CipherText = encrypt(File#file.key, File#file.eof, PlainText),
-    Size = size(CipherText),
-    Hmac = crypto:hmac(sha256, File#file.key, [<<Size:32>>, CipherText]),
-
-    Bytes = [
-        <<$B, $I, $N>>, %% conspicuous marker for DR
-        encode_int(File#file.eof), %% plaintext for DR
-        <<Size:32>>,
-        Hmac,
-        CipherText
-    ],
-    ok = file:write(File#file.fd, Bytes),
-    File#file{eof = File#file.eof + iolist_size(Bytes)}.
-
-
-encrypt(Key, Pos, PlainText) ->
-    State = crypto:stream_init(aes_ctr, Key, essiv(Key, Pos)),
-    {_, CipherText} = crypto:stream_encrypt(State, PlainText),
-    CipherText.
-
-
-decrypt(Key, Pos, CipherText) ->
-    State = crypto:stream_init(aes_ctr, Key, essiv(Key, Pos)),
-    {_, PlainText} = crypto:stream_decrypt(State, CipherText),
-    PlainText.
-
-
 essiv(Key, Pos) ->
     Hash = crypto:hash(sha256, Key),
     State = crypto:stream_init(aes_ctr, Hash, <<0:128>>),
@@ -213,11 +191,6 @@ init_file(KEK, #file{} = File) ->
     {ok, <<$K, $E, $Y, WrappedKey:40/binary>>} = file:pread(File#file.fd, 0, 43),
     Key = rfc3394:unwrap(KEK, WrappedKey),
     File#file{key = Key}.
-
-
-encode_int(Int) when is_integer(Int) ->
-    <<131, Rest/binary>> = term_to_binary(Int),
-    Rest.
 
 
 -ifdef(TEST).
