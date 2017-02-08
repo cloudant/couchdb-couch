@@ -30,7 +30,7 @@
 -define(DBS, couch_dbs).
 -define(PIDS, couch_dbs_pid_to_name).
 
--define(BUFFER, couch_server).
+-define(BUFFER, couch_server_buffer).
 
 -define(MAX_DBS_OPEN, 100).
 -define(RELISTEN_DELAY, 5000).
@@ -306,9 +306,7 @@ open_async(Server, From, DbName, Options) ->
             Error ->
                 Error
         end,
-        % Skip the message queue buffer for database
-        % open results
-        gen_server:call(?MODULE, {open_result, T0, DbName, Result}, infinity),
+        gen_server:call(?BUFFER, {open_result, T0, DbName, Result}, infinity),
         unlink(Parent)
     end),
     ReqType = case lists:member(create, Options) of
@@ -407,10 +405,10 @@ handle_call({open, DbName, Options}, From, Server) ->
     [#db{compactor_pid = Froms} = Db] when is_list(Froms) ->
         % icky hack of field values - compactor_pid used to store clients
         true = ets:insert(?DBS, Db#db{compactor_pid = [From|Froms]}),
-        if length(Froms) =< 10 -> ok; true ->
-            Fmt = "~b clients waiting to open db ~s",
-            couch_log:info(Fmt, [length(Froms), DbName])
-        end,
+        %% if length(Froms) =< 10 -> ok; true ->
+        %%     Fmt = "~b clients waiting to open db ~s",
+        %%     couch_log:info(Fmt, [length(Froms), DbName])
+        %% end,
         {noreply, Server};
     [#db{} = Db] ->
         {reply, {ok, Db}, Server}

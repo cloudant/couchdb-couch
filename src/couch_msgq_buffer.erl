@@ -30,17 +30,14 @@
 ]).
 
 
--define(DEFAULT_RATE, 5000).
--define(RATE_ADJ, 100).
+-define(BACKLOG, 5000).
 -define(WRITE_DEBUG, fun ?MODULE:write_debug/3).
 
 
 -record(st, {
     name,
     target,
-    second,
-    count,
-    rate
+    ts
 }).
 
 
@@ -54,13 +51,11 @@ init(Parent, Name, Target) ->
         true ->
             proc_lib:init_ack(Parent, {ok, self()}),
             Debug = sys:debug_options([]),
-            {_, Second, _} = os:timestamp(),
+            {_, Second, Micro} = os:timestamp(),
             St = #st{
                 name = Name,
                 target = Target,
-                second = Second,
-                count = 0,
-                rate = ?DEFAULT_RATE
+                ts = Second * 1000 + Micro div 1000
             },
             loop(Parent, Debug, St)
     catch error:_ ->
@@ -72,46 +67,31 @@ loop(Parent, Debug, St) ->
     #st{
         name = Name,
         target = Target,
-        second = Second,
-        count = Count,
-        rate = Rate
+        ts = TimeStamp
     } = St,
 
-    {_, NewSecond, MicroSeconds} = os:timestamp(),
+    {_, NewSecond, NewMicro} = os:timestamp(),
+    NewTimeStamp = NewSecond * 1000 + NewMicro div 1000,
 
     receive
         {system, From, Request} ->
             sys:handle_system_msg(Request, From, Parent, Name, Debug, St);
-
         Msg ->
             TargetPid = whereis(Target),
-
-            %%InLoc = {in, loop, Msg},
-            %%Debug2 = sys:handle_debug(Debug, ?WRITE_DEBUG, Name, InLoc),
-
-            NewCount = 1 + (if NewSecond == Second -> Count; true -> 0 end),
-            NewRate = if NewCount < Rate -> Rate; true ->
-                SleepMilli = 1000 - (MicroSeconds div 1000),
-                timer:sleep(SleepMilli),
-
-                case process_info(TargetPid, message_queue_len) of
-                    {_, 0} -> Rate + ?RATE_ADJ;
-                    {_, N} -> Rate - erlang:min(?RATE_ADJ, N)
-                end
+            TargetPid ! Msg,
+            NewSt = case NewTimeStamp - TimeStamp > 10 of
+                true ->
+                    case process_info(TargetPid, message_queue_len) of
+                        {_, N} when N < ?BACKLOG ->
+                            ok;
+                        {_, N} when N >= ?BACKLOG ->
+                            waitfor(TargetPid)
+                    end,
+                    St#st{ts = NewTimeStamp};
+                false ->
+                    St
             end,
 
-            put(status, {NewCount, NewRate}),
-
-            TargetPid ! Msg,
-
-            %%OutLoc = {out, loop, Msg},
-            %%Debug3 = sys:handle_debug(Debug2, ?WRITE_DEBUG, Name, OutLoc),
-
-            NewSt = St#st{
-                second = NewSecond,
-                count = NewCount,
-                rate = NewRate
-            },
             loop(Parent, Debug, NewSt)
     end.
 
@@ -135,3 +115,13 @@ system_replace_state(StateFun, St) ->
 
 write_debug(Dev, Event, Name) ->
     io:format(Dev, "~p event = ~p~n", [Name, Event]).
+
+
+waitfor(Pid) ->
+    timer:sleep(2),
+    case process_info(Pid, message_queue_len) of
+        {_, N} when N < ?BACKLOG ->
+            ok;
+        {_, N} when N >= ?BACKLOG ->
+            waitfor(Pid)
+    end.
