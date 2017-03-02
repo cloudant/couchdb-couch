@@ -297,6 +297,8 @@ find_missing([{Id, Revs}|RestIdRevs], [FullInfo | RestLookupInfo])
 find_missing([{Id, Revs}|RestIdRevs], [not_found | RestLookupInfo]) ->
     [{Id, Revs, []} | find_missing(RestIdRevs, RestLookupInfo)].
 
+
+%   returns {ok, DocInfo} or not_found
 get_doc_info(Db, Id) ->
     case get_full_doc_info(Db, Id) of
     #full_doc_info{} = FDI ->
@@ -305,7 +307,7 @@ get_doc_info(Db, Id) ->
         Else
     end.
 
-%   returns {ok, DocInfo} or not_found
+
 get_full_doc_info(Db, Id) ->
     [Result] = get_full_doc_infos(Db, [Id]),
     Result.
@@ -338,7 +340,7 @@ purge_docs(#db{main_pid=Pid}=Db, UUIdsIdsRevs0, replicated_changes) ->
         ({_, _}, Acc0) -> Acc0
     end, [], lists:zip(Results, UUIdsIdsRevs0)),
     case UUIdsIdsRevs of
-        [] -> ok;
+        [] -> {ok, []};
         _ -> gen_server:call(Pid, {purge_docs, UUIdsIdsRevs})
     end.
 

@@ -97,9 +97,7 @@ handle_call({purge_docs, UUIDsIdsRevs}, _From, Db) ->
     OldDocInfos = couch_db_engine:open_docs(Db, Ids),
     DocInfosPurges = lists:zip(OldDocInfos, UUIDsIdsRevs),
 
-    {_USeq, Replies, Pairs, Purges} = lists:foldl(
-            fun({OldDocInfo, {UUId, Id, Revs}},
-            {UpdSeq, RAcc, PaAcc, PuAcc}) ->
+    FoldFun = fun({OldDocInfo, {UUId, Id, Revs}}, {UpdSeq, RAcc, PaAcc, PuAcc}) ->
         case purge_doc(UpdSeq, OldDocInfo, Id, Revs) of
             not_found ->
                 {UpdSeq,
@@ -112,7 +110,10 @@ handle_call({purge_docs, UUIDsIdsRevs}, _From, Db) ->
                 [Pair| PaAcc],
                 [{UUId, Id, PurgedRevs}| PuAcc]}
         end
-    end, {UpdateSeq, [], [], []}, DocInfosPurges),
+    end,
+    InitAcc = {UpdateSeq, [], [], []},
+    {_USeq, Replies, Pairs, Purges} =
+            lists:foldl(FoldFun, InitAcc, DocInfosPurges),
 
     Db2 = if Pairs == [] -> Db; true ->
         {ok, Db1} = couch_db_engine:purge_doc_revs(
@@ -664,76 +665,79 @@ purge_doc(UpdateSeq, OldDocInfo, Id, Revs) ->
     end.
 
 
-% find the oldest purge seq such that
-% all purge requests that happen before it
-% can be removed from purge trees
+% find purge seq such that all purge requests that happen before or
+% during it can be removed from purge trees
 get_disposable_purge_seq(#db{name=DbName} = Db) ->
     PSeq = couch_db_engine:get(Db, purge_seq),
     OldestPSeq = couch_db_engine:get(Db, oldest_purge_seq),
     PDocsLimit = couch_db_engine:get(Db, purged_docs_limit),
+    ExpectedDispPSeq = PSeq - PDocsLimit,
     % client's purge_seq can be up to "allowed_purge_seq_lag"
-    % behind the oldest Db's purge seq
-    AllowedPSeqLag = list_to_integer(config:get("couchdb",
-        "allowed_purge_seq_lag", "100")),
-    % will warn about client that exceed "allowed_purge_time_lag"
-    % and also have not checkpointed more than "allowed_purge_time_lag"
-    AllowedPTimeLag = list_to_integer(config:get("couchdb",
-        "allowed_purge_time_lag", "86400")), % secs in 1 day
-
-    % Check if length of purge tree is over purged_docs_limit
-    %   by number > AllowedPSeqLag
-    NPurgeExceed = (PSeq-OldestPSeq+1) - PDocsLimit,
-    NewOldestPSeq = if NPurgeExceed =< AllowedPSeqLag ->
-        % no need to compact purge trees
-        OldestPSeq;
+    % behind ExpectedDispPSeq
+    AllowedPSeqLag = config:get_integer("couchdb", "allowed_purge_seq_lag", 100),
+    ClientAllowedMinPSeq = ExpectedDispPSeq - AllowedPSeqLag,
+    DisposablePSeq = if OldestPSeq > ClientAllowedMinPSeq ->
+        % DisposablePSeq is the last pseq we can remove;
+        % it should be one less than OldestPSeq when #purges is within limit
+        OldestPSeq - 1;
     true ->
-        Opts = [{start_key, list_to_binary(?LOCAL_DOC_PREFIX ++ "purge-")},
-            {end_key_gt, list_to_binary(?LOCAL_DOC_PREFIX ++ "purge1")}],
-        FoldFun = fun(Doc, Acc) -> {ok, [Doc | Acc]} end,
-        {ok, LocalPDocs} = couch_db_engine:fold_local_docs(Db, FoldFun, [], Opts),
-
-        ClientAllowedMinPSeq = PSeq - PDocsLimit - AllowedPSeqLag,
-        % Find the smallest purge_seq that has been checkpointed by clients
-        MinClientPSeq = lists:foldl(fun(#doc{id=DocID, body={Props}}, MinPSeq0)->
+        % Find the smallest checkpointed purge_seq among clients
+        Opts = [
+            {start_key, list_to_binary(?LOCAL_DOC_PREFIX ++ "purge-")},
+            {end_key_gt, list_to_binary(?LOCAL_DOC_PREFIX ++ "purge1")}
+        ],
+        FoldFun = fun(#doc{id=DocID, body={Props}}, MinPSeq) ->
             ClientPSeq = couch_util:get_value(<<"purge_seq">>, Props),
-            % Warn about clients which checkpointed purge_seq is very behind
-            MinPSeq2 = if ClientPSeq < ClientAllowedMinPSeq ->
-                % verify if client exists
-                M = couch_util:get_value(<<"verify_module">>, Props),
-                F = couch_util:get_value(<<"verify_function">>, Props),
-                A = couch_util:get_value(<<"verify_options">>, Props),
-                IsClientExists = erlang:apply(M, F, A),
-                case IsClientExists of
-                    true ->
-                        % check client's timestamp - the last time client checkpointed
-                        ClientTime = couch_util:get_value(<<"timestamp_utc">>, Props),
-                        {ok, [Y, Mon, D, H, Min, S], [] }=
-                            io_lib:fread("~4d-~2d-~2dT~2d:~2d:~2dZ", ClientTime),
-                        SecsClient = calendar:datetime_to_gregorian_seconds(
-                            {{Y,Mon,D}, {H, Min, S}}),
-                        SecsNow = calendar:datetime_to_gregorian_seconds(
-                                calendar:now_to_universal_time(os:timestamp())),
-                        % warn if we haven't heard of this client more than a day
-                        if SecsClient + AllowedPTimeLag > SecsNow -> ok; true ->
-                            couch_log:warning("Processing of purge requests is much behind on: ~p."
-                            "Prevents purge_tree of db:~p from compacting.", [A, DbName])
-                        end,
-                        if MinPSeq0 > ClientPSeq -> ClientPSeq; true -> MinPSeq0 end;
-                    false ->
-                        couch_log:warning("Client ~p doesn't exists, but its : ~p doc on ~p"
-                        "still exists. Accessed during compaction of purge_tree",
-                        [A, DocID, DbName]),
-                        % client doesn't exist-> we disregard its purge_seq
-                        MinPSeq0
-                end;
+            MinPSeq2 = if ClientPSeq >= ClientAllowedMinPSeq ->
+                erlang:min(MinPSeq, ClientPSeq);
             true ->
-                if MinPSeq0 > ClientPSeq -> ClientPSeq; true -> MinPSeq0 end
+                case check_client_exists(Props, DbName, DocID) of
+                    true ->  erlang:min(MinPSeq, ClientPSeq);
+                    false -> MinPSeq % ignore nonexisting clients
+                end
             end,
-            MinPSeq2
-        end, PSeq, LocalPDocs),
-        1 + erlang:min(MinClientPSeq, (PSeq-PDocsLimit))
+            {ok, MinPSeq2}
+        end,
+        {ok, ClientPSeq} = couch_db_engine:fold_local_docs(Db, FoldFun, PSeq, Opts),
+        erlang:min(ClientPSeq, ExpectedDispPSeq)
     end,
-    NewOldestPSeq.
+    DisposablePSeq.
+
+
+check_client_exists(Props, DbName, DocID) ->
+    % will warn about clients that have not
+    % checkpointed more than "allowed_purge_time_lag"
+    AllowedPTimeLag = config:get_integer("couchdb",
+        "allowed_purge_time_lag", 86400), % secs in 1 day
+    M = couch_util:get_value(<<"verify_module">>, Props),
+    F = couch_util:get_value(<<"verify_function">>, Props),
+    A = couch_util:get_value(<<"verify_options">>, Props),
+    ClientExists = try erlang:apply(M, F, A) of
+        true ->
+            % warn if we haven't heard of this client more than AllowedPTimeLag
+            ClientTime = couch_util:get_value(<<"timestamp_utc">>, Props),
+            {ok, [Y, Mon, D, H, Min, S], [] }=
+                io_lib:fread("~4d-~2d-~2dT~2d:~2d:~2dZ", ClientTime),
+            SecsClient = calendar:datetime_to_gregorian_seconds(
+                {{Y, Mon, D}, {H, Min, S}}),
+            SecsNow = calendar:datetime_to_gregorian_seconds(
+                calendar:now_to_universal_time(os:timestamp())),
+            if SecsClient + AllowedPTimeLag > SecsNow -> ok; true ->
+                couch_log:warning("Processing of purge requests is much behind on: ~p."
+                "Prevents purge_tree of db:~p from compacting.", [A, DbName])
+            end,
+            true;
+        false ->
+            couch_log:warning("Client ~p doesn't exists, but its : ~p doc on ~p"
+            "still exists. Accessed during compaction of purge_tree",
+                [A, DocID, DbName]),
+            false
+    catch
+        error:Error ->
+            couch_log:error("error in evaluating if client exists: ~p", [Error]),
+        false
+    end,
+    ClientExists.
 
 
 commit_data(Db) ->

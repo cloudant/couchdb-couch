@@ -226,25 +226,24 @@ cet_recompact_purge() ->
 
     {ok, St6, undefined} = Engine:finish_compaction(St5, DbName, [], NewTerm),
     Db2 = test_engine_util:db_as_term(Engine, St6),
-
     Diff = test_engine_util:term_diff(Db1, Db2),
     ?assertEqual(nodiff, Diff).
 
 
-cet_recompact_purged_docs_limit() ->
+cet_compact_purged_docs_limit() ->
     {ok, Engine, Path, St1} = test_engine_util:init_engine(dbpath),
-    % create 1200 docs
+    % create NumDocs docs
     NumDocs = 1200,
     {RActions, RIds} = lists:foldl(fun(Id, {CActions, CIds}) ->
         Id1 = docid(Id),
         Action = {create, {Id1, [{<<"int">>, Id}]}},
         {[Action| CActions], [Id1| CIds]}
     end, {[], []}, lists:seq(1, NumDocs)),
-    Actions = lists:reverse(RActions),
     Ids = lists:reverse(RIds),
-    {ok, St2} = test_engine_util:apply_actions(Engine, St1, Actions),
+    {ok, St2} = test_engine_util:apply_actions(Engine, St1,
+        lists:reverse(RActions)),
 
-    % purge 1005 docs
+    % purge NumDocs docs
     FDIs = Engine:open_docs(St2, Ids),
     RevActions2 = lists:foldl(fun(FDI, CActions) ->
         Id = FDI#full_doc_info.id,
@@ -269,9 +268,11 @@ cet_recompact_purged_docs_limit() ->
     % check that after compaction only purged_docs_limit purge_requests
     % are in purge_tree
     PurgedDocsLimit = Engine:get(St5, purged_docs_limit),
-    NewOldestPSeq = NumDocs - PurgedDocsLimit + 1,
-    {ok, PurgedIdRevs2} = Engine:fold_purged_docs(St5, NewOldestPSeq-1, fun fold_fun/2, [], []),
-    ?assertEqual(NewOldestPSeq, Engine:get(St5, oldest_purge_seq)),
+    OldestPSeq = Engine:get(St5, oldest_purge_seq),
+    {ok, PurgedIdRevs2} = Engine:fold_purged_docs(
+        St5, OldestPSeq - 1, fun fold_fun/2, [], []),
+    ExpectedOldestPSeq = NumDocs - PurgedDocsLimit + 1,
+    ?assertEqual(ExpectedOldestPSeq, OldestPSeq),
     ?assertEqual(PurgedDocsLimit, length(PurgedIdRevs2)).
 
 

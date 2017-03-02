@@ -28,11 +28,15 @@ teardown(DbName) ->
 couch_db_purge_docs_test_() ->
     {
         "Couch_db purge_docs",
-        {
-            setup,
-            fun test_util:start_couch/0, fun test_util:stop_couch/1,
-            [couch_db_purge_docs()]
-        }
+        [
+            {
+                setup,
+                fun test_util:start_couch/0, fun test_util:stop_couch/1,
+                [couch_db_purge_docs()]
+            },
+            purge_with_replication()
+        ]
+
     }.
 
 
@@ -46,10 +50,10 @@ couch_db_purge_docs() ->
                 fun add_two_purge_one/1,
                 fun purge_id_not_exist/1,
                 fun purge_non_leaf_rev/1,
-                fun purge_conflicts/1
+                fun purge_conflicts/1,
+                fun purge_deep_tree/1
             ]
     }.
-
 
 
 purge_simple(DbName) ->
@@ -231,6 +235,100 @@ purge_conflicts(DbName) ->
             ?assertEqual(3, couch_db_engine:get(Db4, update_seq)),
             ?assertEqual(1, couch_db_engine:get(Db4, purge_seq)),
             ?assertEqual([{<<"foo">>, [Rev]}], PIdsRevs)
+        end).
+
+
+purge_deep_tree(DbName) ->
+    ?_test(
+        begin
+            NRevs = 300,
+            {ok, Db0} = couch_db:open_int(DbName, []),
+            {ok, InitRev} = save_doc(Db0, {[{<<"_id">>, <<"bar">>}, {<<"vsn">>, 0}]}),
+            ok = couch_db:close(Db0),
+            LastRev = lists:foldl(fun(V, PrevRev) ->
+                {ok, Db} = couch_db:open_int(DbName, []),
+                {ok, Rev} = save_doc(Db,
+                    {[{<<"_id">>, <<"bar">>},
+                    {<<"vsn">>, V},
+                    {<<"_rev">>, couch_doc:rev_to_str(PrevRev)}]}
+                ),
+                ok = couch_db:close(Db),
+                Rev
+            end, InitRev, lists:seq(2, NRevs)),
+            {ok, Db1} = couch_db:open_int(DbName, []),
+
+            % purge doc
+            UUID = couch_uuids:new(),
+            {ok, {PurgeSeq, [{ok, PRevs}]}} = couch_db:purge_docs(Db1,
+                [{UUID, <<"bar">>, [LastRev]}]),
+            ?assertEqual([LastRev], PRevs),
+            ?assertEqual(1, PurgeSeq),
+
+            {ok, Db2} = couch_db:reopen(Db1),
+            % no docs left
+            ?assertEqual(0, couch_db_engine:get(Db2, doc_count)),
+            ?assertEqual(0, couch_db_engine:get(Db2, del_doc_count)),
+            ?assertEqual(1, couch_db_engine:get(Db2, purge_seq)),
+            ?assertEqual(NRevs + 1 , couch_db_engine:get(Db2, update_seq))
+        end).
+
+
+purge_with_replication() ->
+    ?_test(
+        begin
+            Ctx = test_util:start_couch([couch_replicator]),
+            Source = ?tempdb(),
+            {ok, SourceDb} = create_db(Source),
+            Target = ?tempdb(),
+            {ok, _Db} = create_db(Target),
+
+            % create Doc and do replication to Target
+            {ok, Rev} = save_doc(SourceDb,
+                {[{<<"_id">>, <<"foo">>}, {<<"vsn">>, 1}]}),
+            couch_db:ensure_full_commit(SourceDb),
+            {ok, SourceDb2} = couch_db:reopen(SourceDb),
+            RepObject = {[
+                {<<"source">>, Source},
+                {<<"target">>, Target}
+            ]},
+            {ok, _} = couch_replicator:replicate(RepObject, ?ADMIN_USER),
+            {ok, TargetDb} = couch_db:open_int(Target, []),
+            {ok, Doc} = couch_db:get_doc_info(TargetDb, <<"foo">>),
+
+            % purge Doc on Source and do replication to Target
+            % assert purges don't get replicated to Target
+            UUID = couch_uuids:new(),
+            {ok, _} = couch_db:purge_docs(SourceDb2, [{UUID, <<"foo">>, [Rev]}]),
+            {ok, SourceDb3} = couch_db:reopen(SourceDb2),
+            {ok, _} = couch_replicator:replicate(RepObject, ?ADMIN_USER),
+            {ok, TargetDb2} = couch_db:open_int(Target, []),
+            {ok, Doc2} = couch_db:get_doc_info(TargetDb2, <<"foo">>),
+            [Rev2] = Doc2#doc_info.revs,
+            ?assertEqual(Rev, Rev2#rev_info.rev),
+            ?assertEqual(Doc, Doc2),
+            ?assertEqual(0, couch_db_engine:get(SourceDb3, doc_count)),
+            ?assertEqual(1, couch_db_engine:get(SourceDb3, purge_seq)),
+            ?assertEqual(1, couch_db_engine:get(TargetDb2, doc_count)),
+            ?assertEqual(0, couch_db_engine:get(TargetDb2, purge_seq)),
+
+            % replicate from Target to Source
+            % assert that Doc reappears on Source
+            RepObject2 = {[
+                {<<"source">>, Target},
+                {<<"target">>, Source}
+            ]},
+            {ok, _} = couch_replicator:replicate(RepObject2, ?ADMIN_USER),
+            {ok, SourceDb4} = couch_db:reopen(SourceDb3),
+            {ok, Doc3} = couch_db:get_doc_info(SourceDb4, <<"foo">>),
+            [Rev3] = Doc3#doc_info.revs,
+            ?assertEqual(Rev, Rev3#rev_info.rev),
+            ?assertEqual(1, couch_db_engine:get(SourceDb4, doc_count)),
+            ?assertEqual(1, couch_db_engine:get(SourceDb4, purge_seq)),
+
+            delete_db(Source),
+            delete_db(Target),
+            ok = application:stop(couch_replicator),
+            ok = test_util:stop_couch(Ctx)
         end).
 
 

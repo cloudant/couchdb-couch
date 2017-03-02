@@ -84,6 +84,17 @@
 -include("couch_bt_engine.hrl").
 
 
+-record(pacc, {
+    add_docs = [],
+    rem_ids = [],
+    rem_seqs = [],
+    add_upurges = [],
+    add_purges = [],
+    update_seq,
+    purge_seq
+}).
+
+
 exists(FilePath) ->
     case filelib:is_file(FilePath) of
         true ->
@@ -374,58 +385,53 @@ purge_doc_revs(#st{} = St, DocInfos, Purges) ->
         id_tree = IdTree,
         seq_tree = SeqTree,
         purge_tree = PurgeTree,
-        upurge_tree = PurgeUUIDTree
+        upurge_tree = UPurgeTree
     } = St,
     UpdateSeq = couch_bt_engine_header:get(St#st.header, update_seq),
     PurgeSeq = couch_bt_engine_header:get(St#st.header, purge_seq),
+    PAcc0 = #pacc{update_seq = UpdateSeq, purge_seq = PurgeSeq},
 
-    {AddDocs, RemIds, RemSeqs, AddUPurge, AddPurge, UpdSeq2, NewPurgeSeq} =
-        lists:foldl(fun(DocInfoPurge, Acc) ->
+    PAcc = lists:foldl(fun(DocInfoPurge, Acc) ->
         {{OldFDI, NewFDI}, {UUId, DocId, Revs}} = DocInfoPurge,
-        {ADocs, RIds, RSeqs, AUPurge, APurge, USeq, PSeq} = Acc,
-        case {OldFDI, NewFDI} of
-            {#full_doc_info{id = Id}, #full_doc_info{id = Id}} ->
-                {
-                    [NewFDI|ADocs],
-                    RIds,
-                    [OldFDI#full_doc_info.update_seq|RSeqs],
-                    [{UUId, {DocId, Revs}}|AUPurge],
-                    [{PSeq+1, UUId}|APurge],
-                    NewFDI#full_doc_info.update_seq,
-                    PSeq+1
+        NextPSeq = Acc#pacc.purge_seq + 1,
+        Acc2 = Acc#pacc{
+            rem_seqs = [OldFDI#full_doc_info.update_seq|Acc#pacc.rem_seqs],
+            add_upurges = [{UUId, {DocId, Revs}}|Acc#pacc.add_upurges],
+            add_purges =  [{NextPSeq, UUId}|Acc#pacc.add_purges],
+            purge_seq = NextPSeq
+        },
+        case NewFDI of
+            #full_doc_info{id = DocId, update_seq = NewUSeq} ->
+                Acc2#pacc{
+                    add_docs = [NewFDI|Acc2#pacc.add_docs],
+                    update_seq = NewUSeq
                 };
-            {#full_doc_info{id = Id}, not_found} ->
-               {
-                    ADocs,
-                    [Id|RIds],
-                    [OldFDI#full_doc_info.update_seq|RSeqs],
-                    [{UUId, {DocId, Revs}}|AUPurge],
-                    [{PSeq+1, UUId}|APurge],
-                    USeq,
-                    PSeq+1
-                }
+            not_found ->
+                Acc2#pacc{rem_ids = [DocId|Acc#pacc.rem_ids]}
         end
-    end, {[], [], [], [], [], UpdateSeq, PurgeSeq}, lists:zip(DocInfos,Purges)),
+    end, PAcc0, lists:zip(DocInfos, Purges)),
 
     % We bump NewUpdateSeq because we have to ensure that
     % indexers see that they need to process the new purge
     % information.
-    NewUpdateSeq = if UpdateSeq==UpdSeq2 -> UpdateSeq+1; true -> UpdSeq2 end,
-    {ok, IdTree2} = couch_btree:add_remove(IdTree, AddDocs, RemIds),
-    {ok, SeqTree2} = couch_btree:add_remove(SeqTree, AddDocs, RemSeqs),
-    {ok, PurgeUUIDTree2} = couch_btree:add(PurgeUUIDTree, AddUPurge),
-    {ok, PurgeTree2} = couch_btree:add(PurgeTree, AddPurge),
-
+    NewUpdateSeq = if UpdateSeq == PAcc#pacc.update_seq -> UpdateSeq + 1;
+        true -> PAcc#pacc.update_seq end,
     Header2 = couch_bt_engine_header:set(St#st.header, [
         {update_seq, NewUpdateSeq},
-        {purge_seq, NewPurgeSeq}
+        {purge_seq, PAcc#pacc.purge_seq}
     ]),
+    {ok, IdTree2} = couch_btree:add_remove(IdTree,
+            PAcc#pacc.add_docs, PAcc#pacc.rem_ids),
+    {ok, SeqTree2} = couch_btree:add_remove(SeqTree,
+            PAcc#pacc.add_docs, PAcc#pacc.rem_seqs),
+    {ok, UPurgeTree2} = couch_btree:add(UPurgeTree, PAcc#pacc.add_upurges),
+    {ok, PurgeTree2} = couch_btree:add(PurgeTree, PAcc#pacc.add_purges),
     {ok, St#st{
         header = Header2,
         id_tree = IdTree2,
         seq_tree = SeqTree2,
         purge_tree = PurgeTree2,
-        upurge_tree = PurgeUUIDTree2,
+        upurge_tree = UPurgeTree2,
         needs_commit = true
     }}.
 
@@ -1000,26 +1006,18 @@ finish_compaction_int(#st{} = OldSt, #st{} = NewSt) ->
         filepath = CompactDataPath
     } = NewSt,
 
-    % check if there were new purge requests during compaction
-    OldPSeq = couch_bt_engine:get(OldSt, purge_seq),
-    NewPSeq = couch_bt_engine:get(NewSt, purge_seq),
-    NewSt2 = if NewPSeq == OldPSeq -> NewSt; true->
-        copy_new_purge_info(OldSt, NewSt)
-    end,
-
     % suck up all the local docs into memory and write them to the new db
     LoadFun = fun(Value, _Offset, Acc) ->  {ok, [Value | Acc]} end,
     {ok, _, LocalDocs} = couch_btree:foldl(OldLocal, LoadFun, []),
-    {ok, NewLocal3} = couch_btree:add(NewSt2#st.local_tree, LocalDocs),
+    {ok, NewLocal2} = couch_btree:add(NewSt#st.local_tree, LocalDocs),
 
-    {ok, NewSt3} = commit_data(NewSt2#st{
-        header = couch_bt_engine_header:set(NewSt2#st.header, [
+    {ok, NewSt2} = commit_data(NewSt#st{
+        header = couch_bt_engine_header:set(NewSt#st.header, [
             {compacted_seq, ?MODULE:get(OldSt, update_seq)},
             {revs_limit, ?MODULE:get(OldSt, revs_limit)},
-            {purge_seq, ?MODULE:get(OldSt, purge_seq)},
             {purged_docs_limit, ?MODULE:get(OldSt, purged_docs_limit)}
         ]),
-        local_tree = NewLocal3
+        local_tree = NewLocal2
     }),
 
     % Rename our *.compact.data file to *.compact so that if we
@@ -1042,51 +1040,6 @@ finish_compaction_int(#st{} = OldSt, #st{} = NewSt) ->
     decref(OldSt),
 
     % And return our finished new state
-    {ok, NewSt3#st{
+    {ok, NewSt2#st{
         filepath = FilePath
     }, undefined}.
-
-
-copy_new_purge_info(OldSt, NewSt) ->
-    NewPSeq = couch_bt_engine:get(NewSt, purge_seq),
-    % collect purge requests occurred since NewPSeq
-    {ok, {AddP, AddU, DocIds, IdsRevs}} = fold_purged_docs(OldSt, NewPSeq,
-        fun({PSeq, U, Id, Revs}, {AccP, AccU, AccI, AccR}) ->
-            {[{PSeq,U}|AccP], [{U,{Id, Revs}}|AccU],
-            [Id|AccI], [{Id, Revs}|AccR]}
-        end,
-        {[], [], [], []}, []),
-    {ok, NewPTree} = couch_btree:add(NewSt#st.purge_tree, lists:reverse(AddP)),
-    {ok, NewUTree} = couch_btree:add(NewSt#st.upurge_tree, lists:reverse(AddU)),
-
-    % Since purging a document will change the update_seq,
-    % finish_compaction will restart compaction in order to process
-    % the new updates, which takes care of handling partially
-    % purged documents.
-    % collect only Ids and Seqs of docs that were completely purged
-    OldDocInfos = open_docs(NewSt, DocIds),
-    {RemIds, RemSeqs} = lists:foldl(fun({OldFDI, {Id,Revs}},
-            {ARemIds, ARemSeqs}) ->
-        #full_doc_info{rev_tree=Tree, update_seq=UpSeq} = OldFDI,
-        case couch_key_tree:remove_leafs(Tree, Revs) of
-            {[]= _NewTree, _} ->
-                {[Id| ARemIds], [UpSeq| ARemSeqs]};
-            _ ->
-                {ARemIds, ARemSeqs}
-        end
-    end, {[], []}, lists:zip(OldDocInfos, IdsRevs)),
-    % remove from NewSt docs that were completely purged
-    {NewIdTree, NewSeqTree} = case {RemIds, RemSeqs} of
-        {[], []} ->
-            {NewSt#st.id_tree, NewSt#st.seq_tree};
-        _ ->
-            {ok, NewIT} = couch_btree:add_remove(NewSt#st.id_tree, [], RemIds),
-            {ok, NewST} = couch_btree:add_remove(NewSt#st.seq_tree, [], RemSeqs),
-            {NewIT,NewST}
-    end,
-    NewSt#st{
-        id_tree = NewIdTree,
-        seq_tree = NewSeqTree,
-        purge_tree = NewPTree,
-        upurge_tree = NewUTree
-    }.

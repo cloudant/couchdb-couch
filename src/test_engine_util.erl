@@ -622,13 +622,14 @@ compact(Engine, St1, DbPath) ->
         {'DOWN', Ref, _, _, Reason} ->
             erlang:error({compactor_died, Reason});
         {'$gen_call', {Pid, Ref2}, get_disposable_purge_seq} ->
+            % assuming no client exists (no internal replications or indexes)
             PSeq = Engine:get(St2, purge_seq),
             OldestPSeq = Engine:get(St2, oldest_purge_seq),
             PDocsLimit = Engine:get(St2, purged_docs_limit),
-            NPurgeExceed = (PSeq-OldestPSeq+1) - PDocsLimit,
-            NewOldestPSeq = if NPurgeExceed>0 -> 1 +  (PSeq-PDocsLimit);
-                    true -> OldestPSeq end,
-            Pid!{Ref2, {ok, NewOldestPSeq}},
+            ExpectedDispPSeq = PSeq - PDocsLimit,
+            DisposablePSeq = if ExpectedDispPSeq > 0 -> ExpectedDispPSeq;
+                    true -> OldestPSeq - 1 end,
+            Pid!{Ref2, {ok, DisposablePSeq}},
             receive
                 {'$gen_cast', {compact_done, Engine, Term0}} ->
                     Term0;
