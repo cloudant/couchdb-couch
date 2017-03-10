@@ -131,7 +131,7 @@ maybe_add_sys_db_callbacks(DbName, Options) ->
 	IsReplicatorDb ->
 	    [{before_doc_update, fun couch_replicator_manager:before_doc_update/2},
 	     {after_doc_read, fun couch_replicator_manager:after_doc_read/2},
-	     sys_db, lru_excluded | Options];
+	     sys_db | Options];
 	IsUsersDb ->
 	    [{before_doc_update, fun couch_users_db:before_doc_update/2},
 	     {after_doc_read, fun couch_users_db:after_doc_read/2},
