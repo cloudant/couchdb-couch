@@ -92,7 +92,7 @@ open(DbName, Options0) ->
     end.
 
 update_lru(DbName, Options) ->
-    case lists:member(sys_db, Options) of
+    case lists:member(lru_excluded, Options) of
         false -> gen_server:cast(couch_server, {update_lru, DbName});
         true -> ok
     end.
@@ -125,17 +125,17 @@ maybe_add_sys_db_callbacks(DbName, Options) ->
         orelse path_ends_with(DbName, UsersDbSuffix),
     if
 	DbName == DbsDbName ->
-	    [sys_db | Options];
+	    [sys_db, lru_excluded | Options];
 	DbName == NodesDbName ->
-	    [sys_db | Options];
+	    [sys_db, lru_excluded | Options];
 	IsReplicatorDb ->
 	    [{before_doc_update, fun couch_replicator_manager:before_doc_update/2},
 	     {after_doc_read, fun couch_replicator_manager:after_doc_read/2},
-	     sys_db | Options];
+	     sys_db, lru_excluded | Options];
 	IsUsersDb ->
 	    [{before_doc_update, fun couch_users_db:before_doc_update/2},
 	     {after_doc_read, fun couch_users_db:after_doc_read/2},
-	     sys_db | Options];
+	     sys_db, lru_excluded | Options];
 	true ->
 	    Options
     end.
@@ -272,7 +272,7 @@ all_databases(Fun, Acc0) ->
 
 
 make_room(Server, Options) ->
-    case lists:member(sys_db, Options) of
+    case lists:member(lru_excluded, Options) of
         false -> maybe_close_lru_db(Server);
         true -> {ok, Server}
     end.
@@ -543,13 +543,13 @@ handle_info(Info, Server) ->
     {stop, {unknown_message, Info}, Server}.
 
 db_opened(Server, Options) ->
-    case lists:member(sys_db, Options) of
+    case lists:member(lru_excluded, Options) of
         false -> Server#server{dbs_open=Server#server.dbs_open + 1};
         true -> Server
     end.
 
 db_closed(Server, Options) ->
-    case lists:member(sys_db, Options) of
+    case lists:member(lru_excluded, Options) of
         false -> Server#server{dbs_open=Server#server.dbs_open - 1};
         true -> Server
     end.
@@ -625,12 +625,14 @@ should_add_sys_db_callbacks(DbName) ->
     {test_name(DbName), ?_test(begin
         Options = maybe_add_sys_db_callbacks(DbName, [other_options]),
         ?assert(lists:member(sys_db, Options)),
+        ?assert(lists:member(lru_excluded, Options)),
         ok
     end)}.
 should_not_add_sys_db_callbacks(DbName) ->
     {test_name(DbName), ?_test(begin
         Options = maybe_add_sys_db_callbacks(DbName, [other_options]),
         ?assertNot(lists:member(sys_db, Options)),
+        ?assertNot(lists:member(lru_excluded, Options)),
         ok
     end)}.
 
