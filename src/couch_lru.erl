@@ -11,7 +11,7 @@
 % the License.
 
 -module(couch_lru).
--export([new/0, insert/2, update/2, close/1, size/1]).
+-export([new/0, insert/2, update/2, close/1]).
 
 -include_lib("couch/include/couch_db.hrl").
 
@@ -36,9 +36,6 @@ update(DbName, {Tree0, Dict0}) ->
 
 close({Tree, _} = Cache) ->
     close_int(gb_trees:next(gb_trees:iterator(Tree)), Cache).
-
-size({_, Dict}) ->
-    dict:size(Dict).
 
 %% internals
 
