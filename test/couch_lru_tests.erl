@@ -139,6 +139,23 @@ close_all_active_test_() ->
         end
     }.
 
+size_test_() ->
+    {setup,
+        fun() -> couch_lru:new() end,
+        fun(Lru) ->
+            Lru1 = couch_lru:insert(<<"doc01">>, Lru),
+            Lru2 = couch_lru:insert(<<"doc02">>, Lru1),
+            Lru3 = couch_lru:insert(<<"doc03">>, Lru2),
+            Lru4 = couch_lru:insert(<<"doc01">>, Lru3),
+            [
+                ?_assertEqual(1, couch_lru:size(Lru1)),
+                ?_assertEqual(2, couch_lru:size(Lru2)),
+                ?_assertEqual(3, couch_lru:size(Lru3)),
+                ?_assertEqual(3, couch_lru:size(Lru4))
+            ]
+        end
+    }.
+
 
 add_record(Lru, Key, Pid) ->
     true = ets:insert(couch_dbs, #db{name = Key, main_pid = Pid}),
