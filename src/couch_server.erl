@@ -73,8 +73,8 @@ sup_start_link() ->
 open(DbName, Options0) ->
     Ctx = couch_util:get_value(user_ctx, Options0, #user_ctx{}),
     case ets:lookup(couch_dbs, DbName) of
-    [#db{fd=Fd, fd_monitor=Lock, options=Options} = Db] when Lock =/= locked ->
-        update_lru(DbName, Options),
+    [#db{fd=Fd, fd_monitor=Lock} = Db] when Lock =/= locked ->
+        update_lru(DbName),
         {ok, Db#db{user_ctx=Ctx, fd_monitor=erlang:monitor(process,Fd)}};
     _ ->
         Options = maybe_add_sys_db_callbacks(DbName, Options0),
@@ -91,11 +91,8 @@ open(DbName, Options0) ->
         end
     end.
 
-update_lru(DbName, Options) ->
-    case lists:member(lru_excluded, Options) of
-        false -> gen_server:cast(couch_server, {update_lru, DbName});
-        true -> ok
-    end.
+update_lru(DbName) ->
+    gen_server:cast(couch_server, {update_lru, DbName}).
 
 close_lru() ->
     gen_server:call(couch_server, close_lru).
@@ -125,9 +122,9 @@ maybe_add_sys_db_callbacks(DbName, Options) ->
         orelse path_ends_with(DbName, UsersDbSuffix),
     if
 	DbName == DbsDbName ->
-	    [sys_db, lru_excluded | Options];
+	    [sys_db | Options];
 	DbName == NodesDbName ->
-	    [sys_db, lru_excluded | Options];
+	    [sys_db | Options];
 	IsReplicatorDb ->
 	    [{before_doc_update, fun couch_replicator_manager:before_doc_update/2},
 	     {after_doc_read, fun couch_replicator_manager:after_doc_read/2},
@@ -135,7 +132,7 @@ maybe_add_sys_db_callbacks(DbName, Options) ->
 	IsUsersDb ->
 	    [{before_doc_update, fun couch_users_db:before_doc_update/2},
 	     {after_doc_read, fun couch_users_db:after_doc_read/2},
-	     sys_db, lru_excluded | Options];
+	     sys_db | Options];
 	true ->
 	    Options
     end.
@@ -271,18 +268,12 @@ all_databases(Fun, Acc0) ->
     {ok, FinalAcc}.
 
 
-make_room(Server, Options) ->
-    case lists:member(lru_excluded, Options) of
-        false -> maybe_close_lru_db(Server);
-        true -> {ok, Server}
-    end.
-
-maybe_close_lru_db(#server{dbs_open=NumOpen, max_dbs_open=MaxOpen}=Server)
+maybe_make_room(#server{dbs_open=NumOpen, max_dbs_open=MaxOpen}=Server)
         when NumOpen < MaxOpen ->
     {ok, Server};
-maybe_close_lru_db(#server{lru=Lru}=Server) ->
+maybe_make_room(#server{lru=Lru}=Server) ->
     try
-        {ok, db_closed(Server#server{lru = couch_lru:close(Lru)}, [])}
+        {ok, db_closed(Server#server{lru = couch_lru:close(Lru)})}
     catch error:all_dbs_active ->
         {error, all_dbs_active}
     end.
@@ -316,11 +307,11 @@ open_async(Server, From, DbName, Filepath, Options) ->
         options = Options
     }),
     true = ets:insert(couch_dbs_pid_to_name, {Opener, DbName}),
-    db_opened(Server, Options).
+    db_opened(Server).
 
 handle_call(close_lru, _From, #server{lru=Lru} = Server) ->
     try
-        {reply, ok, db_closed(Server#server{lru = couch_lru:close(Lru)}, [])}
+        {reply, ok, db_closed(Server#server{lru = couch_lru:close(Lru)})}
     catch error:all_dbs_active ->
         {reply, {error, all_dbs_active}, Server}
     end;
@@ -371,7 +362,7 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
         [] ->
             % db was deleted during async open
             {reply, ok, Server};
-        [#db{fd=ReqType, compactor_pid=Froms}=Db] ->
+        [#db{fd=ReqType, compactor_pid=Froms}] ->
             [gen_server:reply(From, Error) || From <- Froms],
             couch_log:info("open_result error ~p for ~s", [Error, DbName]),
             true = ets:delete(couch_dbs, DbName),
@@ -382,7 +373,7 @@ handle_call({open_result, _T0, DbName, Error}, {FromPid, _Tag}, Server) ->
                 _ ->
                     Server
             end,
-            {reply, ok, db_closed(NewServer, Db#db.options)}
+            {reply, ok, db_closed(NewServer)}
     end;
 handle_call({open, DbName, Options}, From, Server) ->
     case ets:lookup(couch_dbs, DbName) of
@@ -390,7 +381,7 @@ handle_call({open, DbName, Options}, From, Server) ->
         DbNameList = binary_to_list(DbName),
         case check_dbname(Server, DbNameList) of
         ok ->
-            case make_room(Server, Options) of
+            case maybe_make_room(Server) of
             {ok, Server2} ->
                 Filepath = get_full_filename(Server, DbNameList),
                 {noreply, open_async(Server2, From, DbName, Filepath, Options)};
@@ -418,7 +409,7 @@ handle_call({create, DbName, Options}, From, Server) ->
     ok ->
         case ets:lookup(couch_dbs, DbName) of
         [] ->
-            case make_room(Server, Options) of
+            case maybe_make_room(Server) of
             {ok, Server2} ->
                 {noreply, open_async(Server2, From, DbName, Filepath,
                         [create | Options])};
@@ -448,18 +439,18 @@ handle_call({delete, DbName, Options}, _From, Server) ->
         Server2 =
         case ets:lookup(couch_dbs, DbName) of
         [] -> Server;
-        [#db{main_pid=Pid, compactor_pid=Froms} = Db] when is_list(Froms) ->
+        [#db{main_pid=Pid, compactor_pid=Froms}] when is_list(Froms) ->
             % icky hack of field values - compactor_pid used to store clients
             true = ets:delete(couch_dbs, DbName),
             true = ets:delete(couch_dbs_pid_to_name, Pid),
             exit(Pid, kill),
             [gen_server:reply(F, not_found) || F <- Froms],
-            db_closed(Server, Db#db.options);
-        [#db{main_pid=Pid} = Db] ->
+            db_closed(Server);
+        [#db{main_pid=Pid}] ->
             true = ets:delete(couch_dbs, DbName),
             true = ets:delete(couch_dbs_pid_to_name, Pid),
             exit(Pid, kill),
-            db_closed(Server, Db#db.options)
+            db_closed(Server)
         end,
 
         %% Delete any leftover compaction files. If we don't do this a
@@ -517,7 +508,7 @@ handle_info({'EXIT', _Pid, config_change}, Server) ->
 handle_info({'EXIT', Pid, Reason}, Server) ->
     case ets:lookup(couch_dbs_pid_to_name, Pid) of
     [{Pid, DbName}] ->
-        [#db{compactor_pid=Froms}=Db] = ets:lookup(couch_dbs, DbName),
+        [#db{compactor_pid=Froms}] = ets:lookup(couch_dbs, DbName),
         if Reason /= snappy_nif_not_loaded -> ok; true ->
             Msg = io_lib:format("To open the database `~s`, Apache CouchDB "
                 "must be built with Erlang OTP R13B04 or higher.", [DbName]),
@@ -532,7 +523,7 @@ handle_info({'EXIT', Pid, Reason}, Server) ->
         end,
         true = ets:delete(couch_dbs, DbName),
         true = ets:delete(couch_dbs_pid_to_name, Pid),
-        {noreply, db_closed(Server, Db#db.options)};
+        {noreply, db_closed(Server)};
     [] ->
         {noreply, Server}
     end;
@@ -542,17 +533,11 @@ handle_info(restart_config_listener, State) ->
 handle_info(Info, Server) ->
     {stop, {unknown_message, Info}, Server}.
 
-db_opened(Server, Options) ->
-    case lists:member(lru_excluded, Options) of
-        false -> Server#server{dbs_open=Server#server.dbs_open + 1};
-        true -> Server
-    end.
+db_opened(Server) ->
+    Server#server{dbs_open=Server#server.dbs_open + 1}.
 
-db_closed(Server, Options) ->
-    case lists:member(lru_excluded, Options) of
-        false -> Server#server{dbs_open=Server#server.dbs_open - 1};
-        true -> Server
-    end.
+db_closed(Server) ->
+    Server#server{dbs_open=Server#server.dbs_open - 1}.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -625,14 +610,12 @@ should_add_sys_db_callbacks(DbName) ->
     {test_name(DbName), ?_test(begin
         Options = maybe_add_sys_db_callbacks(DbName, [other_options]),
         ?assert(lists:member(sys_db, Options)),
-        ?assert(lists:member(lru_excluded, Options)),
         ok
     end)}.
 should_not_add_sys_db_callbacks(DbName) ->
     {test_name(DbName), ?_test(begin
         Options = maybe_add_sys_db_callbacks(DbName, [other_options]),
         ?assertNot(lists:member(sys_db, Options)),
-        ?assertNot(lists:member(lru_excluded, Options)),
         ok
     end)}.
 
