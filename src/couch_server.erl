@@ -334,12 +334,7 @@ handle_call({open_result, T0, DbName, {ok, Db}}, {FromPid, _Tag}, Server) ->
             end,
             true = ets:insert(couch_dbs, Db),
             true = ets:insert(couch_dbs_pid_to_name, {Db#db.main_pid, DbName}),
-            Lru = case couch_db:is_system_db(Db) of
-                false ->
-                    couch_lru:insert(DbName, Server#server.lru);
-                true ->
-                    Server#server.lru
-            end,
+            Lru = couch_lru:insert(DbName, Server#server.lru),
             {reply, ok, Server#server{lru = Lru}}
     end;
 handle_call({open_result, T0, DbName, {error, eexist}}, From, Server) ->
@@ -469,10 +464,7 @@ handle_call({db_updated, #db{}=Db}, _From, Server0) ->
     Server = try ets:lookup_element(couch_dbs, DbName, #db.instance_start_time) of
         StartTime ->
             true = ets:insert(couch_dbs, Db),
-            Lru = case couch_db:is_system_db(Db) of
-                false -> couch_lru:update(DbName, Server0#server.lru);
-                true -> Server0#server.lru
-            end,
+            Lru = couch_lru:update(DbName, Server0#server.lru),
             Server0#server{lru = Lru};
         _ ->
             Server0
