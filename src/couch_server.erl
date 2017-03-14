@@ -264,11 +264,12 @@ all_databases(Fun, Acc0) ->
 maybe_make_room(#server{dbs_open=NumOpen, max_dbs_open=MaxOpen}=Server)
         when NumOpen < MaxOpen ->
     {ok, Server};
-maybe_make_room(#server{lru=Lru}=Server) ->
-    try
-        {ok, db_closed(Server#server{lru = couch_lru:close(Lru)})}
-    catch error:all_dbs_active ->
-        {error, all_dbs_active}
+maybe_make_room(#server{lru=Lru0}=Server) ->
+    case couch_lru:close(Lru0) of
+        all_dbs_active ->
+            {ok, Server};
+        Lru ->
+            maybe_make_room(db_closed(Server#server{lru = Lru}))
     end.
 
 open_async(Server, From, DbName, Filepath, Options) ->

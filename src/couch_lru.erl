@@ -40,7 +40,7 @@ close({Tree, _} = Cache) ->
 %% internals
 
 close_int(none, _) ->
-    erlang:error(all_dbs_active);
+    all_dbs_active;
 close_int({Lru, DbName, Iter}, {Tree, Dict} = Cache) ->
     case ets:update_element(couch_dbs, DbName, {#db.fd_monitor, locked}) of
     true ->

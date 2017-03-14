@@ -135,7 +135,7 @@ close_all_active_test_() ->
             ok = meck:expect(couch_db, is_idle, 1, false),
             {ok, Lru1} = add_record(Lru, <<"test1">>, c:pid(0, 1001, 0)),
             {ok, Lru2} = add_record(Lru1, <<"test2">>, c:pid(0, 2001, 0)),
-            ?_assertError(all_dbs_active, couch_lru:close(Lru2))
+            ?_assertEqual(all_dbs_active, couch_lru:close(Lru2))
         end
     }.
 
