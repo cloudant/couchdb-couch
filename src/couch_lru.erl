@@ -16,32 +16,32 @@
 -include_lib("couch/include/couch_db.hrl").
 
 new() ->
-    {gb_trees:empty(), dict:new()}.
+    {gb_trees:empty(), dict:new(), 0}.
 
-insert(DbName, {Tree0, Dict0}) ->
-    Lru = erlang:now(),
-    {gb_trees:insert(Lru, DbName, Tree0), dict:store(DbName, Lru, Dict0)}.
+insert(DbName, {Tree0, Dict0, Cnt}) ->
+    Lru = Cnt + 1,
+    {gb_trees:insert(Lru, DbName, Tree0), dict:store(DbName, Lru, Dict0), Lru}.
 
-update(DbName, {Tree0, Dict0}) ->
+update(DbName, {Tree0, Dict0, Cnt}) ->
     case dict:find(DbName, Dict0) of
     {ok, Old} ->
-        New = erlang:now(),
+        New = Cnt + 1,
         Tree = gb_trees:insert(New, DbName, gb_trees:delete(Old, Tree0)),
         Dict = dict:store(DbName, New, Dict0),
-        {Tree, Dict};
+        {Tree, Dict, New};
     error ->
         % We closed this database before processing the update.  Ignore
-        {Tree0, Dict0}
+        {Tree0, Dict0, Cnt}
     end.
 
-close({Tree, _} = Cache) ->
+close({Tree, _, _} = Cache) ->
     close_int(gb_trees:next(gb_trees:iterator(Tree)), Cache).
 
 %% internals
 
 close_int(none, _) ->
     all_dbs_active;
-close_int({Lru, DbName, Iter}, {Tree, Dict} = Cache) ->
+close_int({Lru, DbName, Iter}, {Tree, Dict, Cnt} = Cache) ->
     case ets:update_element(couch_dbs, DbName, {#db.fd_monitor, locked}) of
     true ->
         [#db{main_pid = Pid} = Db] = ets:lookup(couch_dbs, DbName),
@@ -49,7 +49,7 @@ close_int({Lru, DbName, Iter}, {Tree, Dict} = Cache) ->
             true = ets:delete(couch_dbs, DbName),
             true = ets:delete(couch_dbs_pid_to_name, Pid),
             exit(Pid, kill),
-            {gb_trees:delete(Lru, Tree), dict:erase(DbName, Dict)};
+            {gb_trees:delete(Lru, Tree), dict:erase(DbName, Dict), Cnt};
         false ->
             true = ets:update_element(couch_dbs, DbName, {#db.fd_monitor, nil}),
             couch_stats:increment_counter([couchdb, couch_server, lru_skip]),
@@ -58,5 +58,6 @@ close_int({Lru, DbName, Iter}, {Tree, Dict} = Cache) ->
     false ->
         NewTree = gb_trees:delete(Lru, Tree),
         NewIter = gb_trees:iterator(NewTree),
-        close_int(gb_trees:next(NewIter), {NewTree, dict:erase(DbName, Dict)})
+        NewCache = {NewTree, dict:erase(DbName, Dict), Cnt},
+        close_int(gb_trees:next(NewIter), NewCache)
     end.

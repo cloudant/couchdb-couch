@@ -32,7 +32,7 @@ new_test_() ->
     {setup,
         fun() -> couch_lru:new() end,
         fun(Lru) ->
-            ?_assertMatch({_, _}, Lru)
+            ?_assertMatch({_, _, _}, Lru)
         end
     }.
 
@@ -41,7 +41,7 @@ insert_test_() ->
         fun() -> couch_lru:new() end,
         fun(Lru) ->
             Key = <<"test">>,
-            {Tree, Dict} = couch_lru:insert(Key, Lru),
+            {Tree, Dict, _} = couch_lru:insert(Key, Lru),
             [
                 ?_assertEqual(1, dict:size(Dict)),
                 ?_assert(dict:is_key(Key, Dict)),
@@ -56,9 +56,9 @@ insert_same_test_() ->
         fun() -> couch_lru:new() end,
         fun(Lru) ->
             Key = <<"test">>,
-            {Tree0, Dict0} = couch_lru:insert(Key, Lru),
+            {Tree0, Dict0, _} = Lru0 = couch_lru:insert(Key, Lru),
             TS0 = dict:fetch(Key, Dict0),
-            {Tree, Dict} = couch_lru:insert(Key, {Tree0, Dict0}),
+            {Tree, Dict, _} = couch_lru:insert(Key, Lru0),
             TS = dict:fetch(Key, Dict),
             [
                 ?_assertEqual(1, dict:size(Dict)),
@@ -75,9 +75,9 @@ update_test_() ->
         fun() -> couch_lru:new() end,
         fun(Lru) ->
             Key = <<"test">>,
-            {Tree0, Dict0} = couch_lru:insert(Key, Lru),
+            {Tree0, Dict0, Cnt0} = Lru0 = couch_lru:insert(Key, Lru),
             TS0 = dict:fetch(Key, Dict0),
-            {Tree, Dict} = couch_lru:update(Key, {Tree0, Dict0}),
+            {Tree, Dict, _} = couch_lru:update(Key, Lru0),
             TS = dict:fetch(Key, Dict),
             [
                 ?_assertEqual(1, dict:size(Dict)),
@@ -94,9 +94,9 @@ update_missing_test_() ->
         fun() -> couch_lru:new() end,
         fun(Lru) ->
             Key = <<"test">>,
-            {Tree0, Dict0} = couch_lru:insert(Key, Lru),
+            {Tree0, Dict0, _} = Lru0 = couch_lru:insert(Key, Lru),
             TS0 = dict:fetch(Key, Dict0),
-            {Tree, Dict} = couch_lru:update(<<"missing">>, {Tree0, Dict0}),
+            {Tree, Dict, _} = couch_lru:update(<<"missing">>, Lru0),
             [
                 ?_assertEqual(1, dict:size(Dict)),
                 ?_assert(dict:is_key(Key, Dict)),
@@ -117,7 +117,7 @@ close_test_() ->
             ok = meck:expect(couch_db, is_idle, 1, true),
             {ok, Lru1} = add_record(Lru, <<"test1">>, c:pid(0, 1001, 0)),
             {ok, Lru2} = add_record(Lru1, <<"test2">>, c:pid(0, 2001, 0)),
-            {Tree, Dict} = couch_lru:close(Lru2),
+            {Tree, Dict, _} = couch_lru:close(Lru2),
             [
                 ?_assertEqual(1, dict:size(Dict)),
                 ?_assert(dict:is_key(Key, Dict)),
