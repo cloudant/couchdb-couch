@@ -19,8 +19,7 @@
 -export([all_databases/0, all_databases/2]).
 -export([init/1, handle_call/3,sup_start_link/0]).
 -export([handle_cast/2,code_change/3,handle_info/2,terminate/2]).
--export([dev_start/0,is_admin/2,has_admins/0,get_stats/0]).
--export([close_lru/0]).
+-export([is_admin/2,has_admins/0,get_stats/0]).
 
 % config_listener api
 -export([handle_config_change/5, handle_config_terminate/3]).
@@ -39,10 +38,6 @@
     lru = couch_lru:new()
     }).
 
-dev_start() ->
-    couch:stop(),
-    up_to_date = make:all([load, debug_info]),
-    couch:start().
 
 get_version() ->
     ?COUCHDB_VERSION. %% Defined in rebar.config.script
@@ -94,8 +89,6 @@ open(DbName, Options0) ->
 update_lru(DbName) ->
     gen_server:cast(couch_server, {update_lru, DbName}).
 
-close_lru() ->
-    gen_server:call(couch_server, close_lru).
 
 create(DbName, Options0) ->
     Options = maybe_add_sys_db_callbacks(DbName, Options0),
@@ -309,12 +302,6 @@ open_async(Server, From, DbName, Filepath, Options) ->
     true = ets:insert(couch_dbs_pid_to_name, {Opener, DbName}),
     db_opened(Server).
 
-handle_call(close_lru, _From, #server{lru=Lru} = Server) ->
-    try
-        {reply, ok, db_closed(Server#server{lru = couch_lru:close(Lru)})}
-    catch error:all_dbs_active ->
-        {reply, {error, all_dbs_active}, Server}
-    end;
 handle_call(open_dbs_count, _From, Server) ->
     {reply, Server#server.dbs_open, Server};
 handle_call({set_update_lru_on_read, UpdateOnRead}, _From, Server) ->
